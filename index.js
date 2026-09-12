@@ -19,6 +19,11 @@ const numCPUs = availableParallelism();
 const PORT = process.env.PORT || 4000;
 const app = express();
 
+// Railway (and most hosts) sit the app behind a reverse proxy, which adds
+// an X-Forwarded-For header. Express needs to be told to trust it,
+// otherwise express-rate-limit throws on every request.
+app.set("trust proxy", 1);
+
 // if (cluster.isPrimary) {
 //   console.log(`Primary ${process.pid} is running`);
 
