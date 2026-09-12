@@ -1,0 +1,57 @@
+======================================================================
+PERFORMANCE TEST SUITE - SIMPLIFIED
+======================================================================
+API URL: http://localhost:4000/api
+Started at: 2026-01-06T08:17:03.203Z
+
+=== TEST 1: Dashboard Response Times ===
+✗ Student Dashboard - Page 1 (50 students): [32m43ms[0m ERROR: 404
+✗ Student Dashboard - Page 2 (50 students): [32m5ms[0m ERROR: 404
+✗ Exam Dashboard - Page 1 (50 exams): [32m3ms[0m ERROR: 404
+
+=== TEST 2: Pagination Verification ===
+✗ Page size 10: ERROR - 404
+✗ Page size 25: ERROR - 404
+✗ Page size 50: ERROR - 404
+✗ Page size 100: ERROR - 404
+
+=== TEST 3: Concurrent Request Handling ===
+Sending 20 concurrent requests...
+Results:
+  Total time: 28ms
+  Successful: 0/20
+  Failed: 20/20
+  Average response time: 19ms
+  Min response time: 14ms
+  Max response time: 20ms
+
+✗ Concurrent test: FAILED
+
+=== TEST 4: Memory Stability Test ===
+Making 100 consecutive requests...
+  20/100 requests - Heap: 12.53MB
+  40/100 requests - Heap: 11.53MB
+  60/100 requests - Heap: 10.70MB
+  80/100 requests - Heap: 12.35MB
+  100/100 requests - Heap: 11.51MB
+
+Memory Usage:
+  Before: 10.79MB
+  After:  11.51MB
+  Diff:   0.72MB
+  Successful requests: 0/100
+  Average response time: 2ms
+
+✓ Memory test: PASSED
+
+======================================================================
+TEST SUMMARY
+======================================================================
+Total tests: 127
+Passed: 0
+Failed: 127
+Success rate: 0.0%
+Average response time: 5ms
+
+Completed at: 2026-01-06T08:17:03.504Z
+======================================================================
