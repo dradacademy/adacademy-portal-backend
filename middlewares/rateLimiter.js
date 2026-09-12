@@ -30,8 +30,20 @@ const generalLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+// PDF question extraction calls a paid AI API per request — keep this tight.
+const pdfImportLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000, // 10 minutes
+  max: 10, // Limit each IP to 10 PDF extractions per 10 minutes
+  message: {
+    error: "Too many PDF import attempts, please try again later",
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 module.exports = {
   authLimiter,
   submissionLimiter,
   generalLimiter,
+  pdfImportLimiter,
 };

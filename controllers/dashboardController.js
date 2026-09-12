@@ -3,6 +3,9 @@ const ExamSubmission = require("../models/examSubmissionSchema");
 const User = require("../models/userModel");
 const Exam = require("../models/examModel");
 const markModel = require("../models/markModel");
+const {
+  calculateTotalPossibleMarks,
+} = require("../utils/ExamSubmissionHelper");
 
 // Get all exams overview
 const getAllExamsOverview = async (req, res) => {
@@ -38,7 +41,7 @@ const getAllExamsOverview = async (req, res) => {
           $project: {
             _id: 1,
             examCode: 1,
-            level: 1,
+            order: 1,
             subTopic: 1,
             "subjectData._id": 1,
             "subjectData.name": 1,
@@ -129,7 +132,7 @@ const getAllExamsOverview = async (req, res) => {
                 },
               },
             },
-            level: 1,
+            order: 1,
             totalSubmissions: 1,
             avgScore: { $round: ["$avgScore", 2] },
             passRate: { $round: ["$passRate", 2] },
@@ -231,23 +234,14 @@ const getExamDetailedAnalysis = async (req, res) => {
       throw new Error("Mark configuration not found");
     }
 
-    // Helper function to get positive mark for level
-    const getPositiveMarkForLevel = (level) => {
-      switch (level) {
-        case 1:
-          return markData.level1Mark;
-        case 2:
-          return markData.level2Mark;
-        case 3:
-          return markData.level3Mark;
-        case 4:
-          return markData.level4Mark;
-        default:
-          return 1;
-      }
-    };
-
-    const positiveMark = getPositiveMarkForLevel(exam.level);
+    // Total possible marks for this exam, summed per-question (each
+    // question may override marks individually; falls back to the
+    // level-based config otherwise). Exams no longer carry one uniform
+    // level/mark, so this replaces the old single `positiveMark` value.
+    const totalPossibleMarks = calculateTotalPossibleMarks(
+      exam.questions || [],
+      markData
+    );
 
     /* =======================
        A. EXAM SUMMARY
@@ -266,19 +260,23 @@ const getExamDetailedAnalysis = async (req, res) => {
        B. PERFORMANCE DISTRIBUTION
     ======================= */
     const above75 = submissions.filter((s) => {
-      const totalMarks = s.examData.length * positiveMark;
-      return totalMarks > 0 ? (s.obtainedMark / totalMarks) * 100 > 75 : false;
+      return totalPossibleMarks > 0
+        ? (s.obtainedMark / totalPossibleMarks) * 100 > 75
+        : false;
     }).length;
-    
+
     const between50_75 = submissions.filter((s) => {
-      const totalMarks = s.examData.length * positiveMark;
-      const percentage = totalMarks > 0 ? (s.obtainedMark / totalMarks) * 100 : 0;
+      const percentage =
+        totalPossibleMarks > 0
+          ? (s.obtainedMark / totalPossibleMarks) * 100
+          : 0;
       return percentage >= 50 && percentage <= 75;
     }).length;
-    
+
     const below50 = submissions.filter((s) => {
-      const totalMarks = s.examData.length * positiveMark;
-      return totalMarks > 0 ? (s.obtainedMark / totalMarks) * 100 < 50 : true;
+      return totalPossibleMarks > 0
+        ? (s.obtainedMark / totalPossibleMarks) * 100 < 50
+        : true;
     }).length;
 
     const performanceDistribution = {
@@ -414,7 +412,7 @@ const getExamDetailedAnalysis = async (req, res) => {
           subTopic: examSubTopic
             ? { _id: examSubTopic._id, name: examSubTopic.name }
             : null,
-          level: exam.level,
+          order: exam.order,
           passPercentage: exam.passPercentage,
         },
         summary: {
@@ -468,7 +466,11 @@ const getAllStudentsOverview = async (req, res) => {
     const studentsData = await Promise.all(
       allStudents.map(async (student) => {
         const submissions = await ExamSubmission.find({ userId: student._id })
-          .populate("examId", "level")
+          .populate({
+            path: "examId",
+            select: "questions",
+            populate: { path: "questions" },
+          })
           .lean();
 
         const totalExams = submissions.length;
@@ -480,24 +482,12 @@ const getAllStudentsOverview = async (req, res) => {
 
         submissions.forEach((sub) => {
           if (sub.examId && sub.examData && sub.examData.length > 0) {
-            // Get positive mark for this exam's level
-            let positiveMark = 1;
-            switch (sub.examId.level) {
-              case 1:
-                positiveMark = markData.level1Mark;
-                break;
-              case 2:
-                positiveMark = markData.level2Mark;
-                break;
-              case 3:
-                positiveMark = markData.level3Mark;
-                break;
-              case 4:
-                positiveMark = markData.level4Mark;
-                break;
-            }
-
-            const totalMarks = sub.examData.length * positiveMark;
+            // Total possible marks, summed per-question (per-question
+            // overrides fall back to the level-based config).
+            const totalMarks = calculateTotalPossibleMarks(
+              sub.examId.questions || [],
+              markData
+            );
             const percentage = totalMarks > 0 ? (sub.obtainedMark / totalMarks) * 100 : 0;
             totalPercentage += percentage;
 
@@ -569,10 +559,15 @@ const getStudentDetailedAnalysis = async (req, res) => {
     const submissions = await ExamSubmission.find({ userId: studentId })
       .populate({
         path: "examId",
-        populate: {
-          path: "subject",
-          select: "name subtopics",
-        },
+        populate: [
+          {
+            path: "subject",
+            select: "name subtopics",
+          },
+          {
+            path: "questions",
+          },
+        ],
       })
       .populate("examData.questionId", "topic subTopic questionType")
       .lean();
@@ -591,21 +586,6 @@ const getStudentDetailedAnalysis = async (req, res) => {
       throw new Error("Mark configuration not found");
     }
 
-    const getPositiveMarkForLevel = (level) => {
-      switch (level) {
-        case 1:
-          return markData.level1Mark;
-        case 2:
-          return markData.level2Mark;
-        case 3:
-          return markData.level3Mark;
-        case 4:
-          return markData.level4Mark;
-        default:
-          return 1;
-      }
-    };
-
     const totalPercentageArray =
       submissions.length > 0
         ? submissions
@@ -613,8 +593,10 @@ const getStudentDetailedAnalysis = async (req, res) => {
               (exam) => exam.status === "completed" && exam.examData.length > 0 && exam.examId,
             )
             .map((exam) => {
-              const positiveMark = getPositiveMarkForLevel(exam.examId.level);
-              const totalMarks = exam.examData.length * positiveMark;
+              const totalMarks = calculateTotalPossibleMarks(
+                exam.examId.questions || [],
+                markData
+              );
               return totalMarks > 0 ? (exam.obtainedMark / totalMarks) * 100 : 0;
             })
         : [];
@@ -723,9 +705,10 @@ const getStudentDetailedAnalysis = async (req, res) => {
           if (match) subTopicName = match.name;
         }
 
-        const positiveMark = getPositiveMarkForLevel(sub.examId.level);
-
-        const totalMarks = sub.examData.length * positiveMark;
+        const totalMarks = calculateTotalPossibleMarks(
+          sub.examId?.questions || [],
+          markData
+        );
 
         const percentage =
           totalMarks > 0
@@ -736,7 +719,7 @@ const getStudentDetailedAnalysis = async (req, res) => {
           examId: sub.examId?._id,
           subject: sub.examId?.subject?.name || "N/A",
           subTopic: subTopicName || "N/A",
-          level: sub.examId?.level || "N/A",
+          order: sub.examId?.order ?? "N/A",
           totalQuestions: sub.examData.length,
           correct,
           wrong,

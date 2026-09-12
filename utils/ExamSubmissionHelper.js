@@ -140,13 +140,54 @@ const getMarksByLevel = (mark, level) => {
 };
 
 /**
- * Calculate total possible marks for an exam
- * @param {Number} questionCount - Number of questions in exam
- * @param {Number} positiveMark - Marks per correct answer
+ * Resolve the effective positive/negative marks for a single question.
+ * A question's own `marks`/`negativeMark` (set individually by the admin)
+ * take priority; when either is null/undefined, fall back to the global
+ * level-based Mark config for that question's level.
+ * @param {Object} question - Question doc/subdoc (needs level, marks, negativeMark)
+ * @param {Object} markConfig - Global Mark config (level1Mark, level1NegativeMark, ...)
+ * @returns {{positive: Number, negative: Number}}
+ */
+const resolveQuestionMarks = (question, markConfig) => {
+  const fallback = markConfig
+    ? getMarksByLevel(markConfig, question.level)
+    : { positive: 0, negative: 0 };
+
+  return {
+    positive: question.marks ?? fallback.positive,
+    negative: question.negativeMark ?? fallback.negative,
+  };
+};
+
+/**
+ * Resolve the effective duration (in seconds) for a single question.
+ * A question's own `duration` takes priority; otherwise falls back to the
+ * global level-based Duration config for that question's level, and
+ * finally to a hardcoded 3600s safety default if even that is missing.
+ * @param {Object} question - Question doc/subdoc (needs level, duration)
+ * @param {Object} durationConfig - Global Duration config (level1Duration, ...)
+ * @returns {Number} duration in seconds
+ */
+const resolveQuestionDuration = (question, durationConfig) => {
+  const fallback = durationConfig
+    ? durationConfig[`level${question.level}Duration`]
+    : null;
+
+  return question.duration ?? fallback ?? 3600;
+};
+
+/**
+ * Calculate total possible marks for an exam by summing each question's own
+ * resolved positive marks (per-question override, or level-based fallback).
+ * @param {Array} questions - Array of question docs/subdocs
+ * @param {Object} markConfig - Global Mark config
  * @returns {Number} Total possible marks
  */
-const calculateTotalPossibleMarks = (questionCount, positiveMark) => {
-  return questionCount * positiveMark;
+const calculateTotalPossibleMarks = (questions, markConfig) => {
+  return questions.reduce(
+    (sum, q) => sum + resolveQuestionMarks(q, markConfig).positive,
+    0
+  );
 };
 
 /**
@@ -177,6 +218,8 @@ module.exports = {
   evaluateQuestion,
   calculateMarks,
   getMarksByLevel,
+  resolveQuestionMarks,
+  resolveQuestionDuration,
   calculateTotalPossibleMarks,
   validateMarks,
 };

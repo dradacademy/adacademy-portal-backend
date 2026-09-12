@@ -23,10 +23,13 @@ const examSchema = new mongoose.Schema(
         ref: "Question",
       },
     ],
-    level: {
+    // Position of this exam within its subject+subTopic sequence (1, 2, 3...).
+    // Replaces the old single `level` field — an exam can now freely mix
+    // questions of different levels (each Question carries its own level),
+    // and progression/unlocking is based on this order instead of level.
+    order: {
       type: Number,
       required: true,
-      enum: [1, 2, 3, 4],
     },
     status: {
       type: String,
@@ -94,7 +97,7 @@ const examSchema = new mongoose.Schema(
 );
 
 // Performance indexes for common queries
-examSchema.index({ subject: 1, subTopic: 1, level: 1 }); // For exam lookups
+examSchema.index({ subject: 1, subTopic: 1, order: 1 }, { unique: true }); // For exam lookups + ordering
 examSchema.index({ status: 1 }); // For active exam queries
 
 module.exports = mongoose.model("Exam", examSchema);

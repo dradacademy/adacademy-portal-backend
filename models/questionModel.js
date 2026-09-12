@@ -30,8 +30,25 @@ const QuestionSchema = new mongoose.Schema(
       default: undefined, // Only needed for MCQ & MSQ
     },
     correctAnswers: {
-      type: [String], 
+      type: [String],
       required: true,
+    },
+    // Optional per-question overrides. When null, grading/duration logic
+    // falls back to the global level-based Mark/Duration config for this
+    // question's `level`. This is what lets an admin customize marks,
+    // negative marks, and duration individually per question instead of
+    // relying on one fixed value for the whole exam/level.
+    marks: {
+      type: Number,
+      default: null,
+    },
+    negativeMark: {
+      type: Number,
+      default: null,
+    },
+    duration: {
+      type: Number, // seconds
+      default: null,
     },
     image: {
       type: String,

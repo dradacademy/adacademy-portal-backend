@@ -12,6 +12,9 @@ const {
 const examSubmissionSchema = require("../models/examSubmissionSchema");
 const attemptCounterModel = require("../models/attemptCounterModel");
 const durationModel = require("../models/durationModel");
+const {
+  resolveQuestionDuration,
+} = require("../utils/ExamSubmissionHelper");
 
 const router = express.Router();
 
@@ -51,20 +54,15 @@ router.post(
       });
 
       // Get Duration Config
-      let allowedDuration = 3600; // Default 1 hour
       const durationConfig = await durationModel.findById("duration-in-seconds");
-      
-      if (durationConfig) {
-        if (req.exam.level === 1) allowedDuration = durationConfig.level1Duration;
-        else if (req.exam.level === 2) allowedDuration = durationConfig.level2Duration;
-        else if (req.exam.level === 3) allowedDuration = durationConfig.level3Duration;
-        else if (req.exam.level === 4) allowedDuration = durationConfig.level4Duration;
-      }
-      
-      // Calculate total duration based on question count
-      // Logic from `AttendExamStudent.jsx` (questions.length * perQuestionDuration)
-      // This ensures server and client agree on the total time.
-      const totalDuration = req.exam.questions.length * allowedDuration;
+
+      // Calculate total duration by summing each question's own resolved
+      // duration (per-question override, or level-based fallback). This
+      // must match the calculation in examSubmissionController.js.
+      const totalDuration = req.exam.questions.reduce(
+        (sum, q) => sum + resolveQuestionDuration(q, durationConfig),
+        0
+      );
 
       if (submission) {
         // Idempotent: Return existing started submission
@@ -116,15 +114,11 @@ router.post(
         });
 
         // Get Duration Config (Repeated for error case)
-        let allowedDuration = 3600;
         const durationConfig = await durationModel.findById("duration-in-seconds");
-        if (durationConfig) {
-           if (req.exam.level === 1) allowedDuration = durationConfig.level1Duration;
-           else if (req.exam.level === 2) allowedDuration = durationConfig.level2Duration;
-           else if (req.exam.level === 3) allowedDuration = durationConfig.level3Duration;
-           else if (req.exam.level === 4) allowedDuration = durationConfig.level4Duration;
-        }
-        const totalDuration = req.exam.questions.length * allowedDuration;
+        const totalDuration = req.exam.questions.reduce(
+          (sum, q) => sum + resolveQuestionDuration(q, durationConfig),
+          0
+        );
 
         if (existingSubmission) {
           return res.status(200).json({

@@ -2,7 +2,7 @@ const request = require("supertest");
 const mongoose = require("mongoose");
 const app = require("../index");
 const examSubmissionSchema = require("../models/examSubmissionSchema");
-const userPassSchema = require("../models/userPassSchema");
+const examPassModel = require("../models/examPassModel");
 const attemptCounterModel = require("../models/attemptCounterModel");
 const userModel = require("../models/userModel");
 const examModel = require("../models/examModel");
@@ -48,8 +48,8 @@ describe("Data Integrity Tests", () => {
         _id: examId,
         subject: new mongoose.Types.ObjectId(),
         subTopic: new mongoose.Types.ObjectId(),
-        level: 1,
-        status: 'Active',
+        order: 1,
+        status: 'active',
         examCode: 'DITEST123',
         questions: [],
         passPercentage: 50
@@ -63,7 +63,7 @@ describe("Data Integrity Tests", () => {
     // Cleanup
     try {
       await examSubmissionSchema.deleteMany({ userId: studentId });
-      await userPassSchema.deleteMany({ userId: studentId });
+      await examPassModel.deleteMany({ userId: studentId });
       await attemptCounterModel.deleteMany({ userId: studentId });
       await examModel.deleteMany({ _id: examId });
       await userModel.deleteMany({ _id: studentId });
@@ -76,7 +76,7 @@ describe("Data Integrity Tests", () => {
     // Clean up submissions and counters before each test
     try {
       await examSubmissionSchema.deleteMany({ userId: studentId });
-      await userPassSchema.deleteMany({ userId: studentId });
+      await examPassModel.deleteMany({ userId: studentId });
       await attemptCounterModel.deleteMany({ userId: studentId });
     } catch (error) {
       console.log('BeforeEach cleanup error:', error.message);
@@ -111,16 +111,18 @@ describe("Data Integrity Tests", () => {
       ).rejects.toThrow(/duplicate key|E11000/);
     });
 
-    it("should prevent duplicate UserPass records", async () => {
+    it("should prevent duplicate ExamPass records", async () => {
       const testUserId = new mongoose.Types.ObjectId();
+      const testExamId = new mongoose.Types.ObjectId();
       const testSubjectId = new mongoose.Types.ObjectId();
       const testSubTopicId = new mongoose.Types.ObjectId();
 
-      const pass1 = await userPassSchema.create({
+      const pass1 = await examPassModel.create({
         userId: testUserId,
+        examId: testExamId,
         subject: testSubjectId,
         subTopic: testSubTopicId,
-        level: 1,
+        order: 1,
         pass: true,
       });
 
@@ -128,11 +130,12 @@ describe("Data Integrity Tests", () => {
 
       // Try to create duplicate - should fail
       await expect(
-        userPassSchema.create({
+        examPassModel.create({
           userId: testUserId,
+          examId: testExamId,
           subject: testSubjectId,
           subTopic: testSubTopicId,
-          level: 1,
+          order: 1,
           pass: true,
         })
       ).rejects.toThrow(/duplicate key|E11000/);

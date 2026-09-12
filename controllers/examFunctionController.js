@@ -3,9 +3,12 @@ const examSubmissionSchema = require("../models/examSubmissionSchema");
 const markModel = require("../models/markModel");
 const questionModel = require("../models/questionModel");
 const Subject = require("../models/subjectModel");
-const userPassSchema = require("../models/userPassSchema");
+const examPassModel = require("../models/examPassModel");
 const { ensureMarkConfigExists } = require("./markController");
 const { retryTransaction } = require("../utils/transactionHelper");
+const {
+  calculateTotalPossibleMarks,
+} = require("../utils/ExamSubmissionHelper");
 
 const getEligibleExamForUser = async (req, res) => {
   try {
@@ -25,107 +28,69 @@ const getEligibleExamForUser = async (req, res) => {
       });
     }
 
-    // Fetch user's passed exams
-    const userProgress = await userPassSchema
+    // Fetch user's passed exams (order-based progression now, not level-based)
+    const userProgress = await examPassModel
       .find({ userId, pass: true })
-      .select("subject subTopic level");
+      .select("subject subTopic order");
 
-    let eligibleExams = new Map();
-
-    // Build a set of already passed exams for quick lookup
-    const passedSet = new Set(
-      userProgress.map((p) => `${p.subject}-${p.subTopic}-${p.level}`)
-    );
-
-    for (let progress of userProgress) {
-      const subjectId = progress.subject;
-      const subTopicId = progress.subTopic;
-
-      const levelsToCheck = [
-        progress.level - 2,
-        progress.level - 1,
-        progress.level + 1,
-      ];
-
-      for (let level of levelsToCheck) {
-        if (level >= 1 && level <= 4) {
-          const key = `${subjectId}-${subTopicId}-${level}`;
-          if (!passedSet.has(key)) {
-            eligibleExams.set(key, {
-              subjectId,
-              subTopicId,
-              level,
-            });
-          }
-        }
-      }
+    // Group passed orders by subject+subTopic for quick lookup
+    const passedOrdersByKey = new Map(); // `${subject}-${subTopic}` -> Set(order)
+    for (const p of userProgress) {
+      const key = `${p.subject}-${p.subTopic}`;
+      if (!passedOrdersByKey.has(key)) passedOrdersByKey.set(key, new Set());
+      passedOrdersByKey.get(key).add(p.order);
     }
 
-    // For subjects/subtopics the user has never touched, show level 1
     const allSubjects = await Subject.find().select("_id name subtopics");
 
-    for (let subject of allSubjects) {
-      for (let subTopic of subject.subtopics) {
-        const key = `${subject._id}-${subTopic._id}-1`;
+    const flattenedExams = [];
 
-        // Check if the user has passed anything in this subject-subtopic
-        const hasProgress = userProgress.some(
-          (p) =>
-            p.subject.toString() === subject._id.toString() &&
-            p.subTopic.toString() === subTopic._id.toString()
-        );
+    // For every subject+subTopic, the "next eligible" exam is the first
+    // (lowest-order) exam not yet passed, provided its predecessor (order-1)
+    // has been passed (order 1 is always open).
+    for (const subject of allSubjects) {
+      for (const subTopic of subject.subtopics) {
+        const key = `${subject._id}-${subTopic._id}`;
+        const passedOrders = passedOrdersByKey.get(key) || new Set();
 
-        if (!hasProgress && !eligibleExams.has(key)) {
-          eligibleExams.set(key, {
-            subjectId: subject._id,
-            subTopicId: subTopic._id,
-            level: 1,
-          });
+        const exams = await examModel
+          .find({
+            subject: subject._id,
+            subTopic: subTopic._id,
+            status: "active",
+          })
+          .sort({ order: 1 });
+
+        for (const exam of exams) {
+          if (passedOrders.has(exam.order)) continue; // already passed, keep scanning
+
+          const isEligible =
+            exam.order === 1 || passedOrders.has(exam.order - 1);
+
+          if (isEligible) {
+            flattenedExams.push({
+              _id: exam._id,
+              subjectId: exam.subject,
+              subjectName: subject.name,
+              subTopicId: exam.subTopic,
+              subTopicName: subTopic.name,
+              questions: exam.questions,
+              order: exam.order,
+              status: exam.status,
+              createdAt: exam.createdAt,
+              updatedAt: exam.updatedAt,
+              __v: exam.__v,
+              examCode: exam.examCode,
+              passPercentage: exam.passPercentage,
+            });
+          }
+
+          // Only the first not-yet-passed exam in the sequence can ever be
+          // eligible — stop scanning further orders in this subtopic.
+          break;
         }
       }
     }
-
-    // Fetch exam documents
-    const eligibleExamList = await Promise.all(
-      Array.from(eligibleExams.values()).map(async (item) => {
-        return examModel.find({
-          subject: item.subjectId,
-          subTopic: item.subTopicId,
-          level: item.level,
-          status: "active",
-        });
-      })
-    );
-
-    let flattenedExams = eligibleExamList.flat();
-
-    // Add readable names
-    flattenedExams = flattenedExams.map((exam) => {
-      const subject = allSubjects.find((sub) => sub._id.equals(exam.subject));
-      let subTopicName = "";
-      if (subject) {
-        const subTopic = subject.subtopics.find((st) =>
-          st._id.equals(exam.subTopic)
-        );
-        if (subTopic) subTopicName = subTopic.name;
-      }
-
-      return {
-        _id: exam._id,
-        subjectId: exam.subject,
-        subjectName: subject ? subject.name : null,
-        subTopicId: exam.subTopic,
-        subTopicName: subTopicName || null,
-        questions: exam.questions,
-        level: exam.level,
-        status: exam.status,
-        createdAt: exam.createdAt,
-        updatedAt: exam.updatedAt,
-        __v: exam.__v,
-        examCode: exam.examCode,
-        passPercentage: exam.passPercentage,
-      };
-    });
 
     res.status(200).json(flattenedExams);
   } catch (error) {
@@ -139,7 +104,14 @@ const getEligibleExamForUser = async (req, res) => {
 
 const manuallyPassExam = async (req, res) => {
   try {
-    const { userId, subjectId, subTopicId, level } = req.body;
+    const { userId, subjectId, subTopicId, examId } = req.body;
+
+    if (!userId || !subjectId || !subTopicId || !examId) {
+      return res.status(400).json({
+        success: false,
+        message: "userId, subjectId, subTopicId and examId are required.",
+      });
+    }
 
     let markData = await markModel.findById("mark-based-on-levels");
     if (!markData) {
@@ -147,21 +119,9 @@ const manuallyPassExam = async (req, res) => {
       markData = await markModel.findById("mark-based-on-levels");
     }
 
-    let positiveMark = markData.level1Mark;
-
-    if (level === 2) {
-      positiveMark = markData.level2Mark;
-    } else if (level === 3) {
-      positiveMark = markData.level3Mark;
-    } else if (level === 4) {
-      positiveMark = markData.level4Mark;
-    }
-
-    const existingPass = await userPassSchema.findOne({
+    const existingPass = await examPassModel.findOne({
       userId,
-      subject: subjectId,
-      subTopic: subTopicId,
-      level,
+      examId,
       pass: true,
     });
 
@@ -172,24 +132,25 @@ const manuallyPassExam = async (req, res) => {
       });
     }
 
-    const exam = await examModel.findOne({
-      subject: subjectId,
-      subTopic: subTopicId,
-      level,
-      status: "active",
-    });
+    const exam = await examModel
+      .findOne({
+        _id: examId,
+        subject: subjectId,
+        subTopic: subTopicId,
+        status: "active",
+      })
+      .populate("questions");
 
     if (!exam) {
       return res.status(404).json({
         success: false,
         message:
-          "Exam not found for the specified subject, subtopic, and level.",
+          "Exam not found for the specified subject, subtopic, and exam.",
       });
     }
 
     const enhancedExamData = await Promise.all(
-      exam.questions.map(async (questionId) => {
-        const questionData = await questionModel.findById(questionId);
+      exam.questions.map(async (questionData) => {
         if (!questionData) return null;
 
         if (questionData.questionType === "MCQ") {
@@ -219,7 +180,7 @@ const manuallyPassExam = async (req, res) => {
       })
     );
 
-    const obtainedMark = exam.questions.length * positiveMark;
+    const obtainedMark = calculateTotalPossibleMarks(exam.questions, markData);
 
     await examSubmissionSchema.create({
       userId,
@@ -230,15 +191,16 @@ const manuallyPassExam = async (req, res) => {
       pass: true,
     });
 
-    const newPass = new userPassSchema({
-      userId,
-      subject: subjectId,
-      subTopic: subTopicId,
-      level,
-      pass: true,
-    });
-
-    await newPass.save();
+    await examPassModel.findOneAndUpdate(
+      { userId, examId: exam._id },
+      {
+        pass: true,
+        subject: subjectId,
+        subTopic: subTopicId,
+        order: exam.order,
+      },
+      { upsert: true }
+    );
 
     res.status(200).json({
       success: true,
@@ -255,46 +217,36 @@ const manuallyPassExam = async (req, res) => {
 
 const deletePassedExam = async (req, res) => {
   try {
-    const { userId, subjectId, subTopicId, level } = req.body;
+    const { userId, examId } = req.body;
 
-    if (!userId || !subjectId || !subTopicId || !level) {
+    if (!userId || !examId) {
       return res.status(400).json({
         success: false,
-        message: "Missing required fields.",
+        message: "userId and examId are required.",
       });
     }
 
-    const existingPass = await userPassSchema.findOne({
+    const existingPass = await examPassModel.findOne({
       userId,
-      subject: subjectId,
-      subTopic: subTopicId,
-      level,
+      examId,
       pass: true,
     });
 
     if (!existingPass) {
       return res.status(404).json({
         success: false,
-        message:
-          "No passed exam found for the specified user, subject, subtopic, and level.",
+        message: "No passed exam found for the specified user and exam.",
       });
     }
 
-    const examData = await examModel.findOne({
-      subject: subjectId,
-      subTopic: subTopicId,
-      level,
-      status: "active",
-    });
-
-    // Delete both UserPass and ExamSubmission in a transaction
+    // Delete both ExamPass and ExamSubmission in a transaction
     await retryTransaction(async (session) => {
-      await userPassSchema.deleteOne({ _id: existingPass._id }, { session });
+      await examPassModel.deleteOne({ _id: existingPass._id }, { session });
 
       await examSubmissionSchema.deleteOne(
         {
           userId,
-          examId: examData._id,
+          examId,
           pass: true,
         },
         { session }
@@ -320,121 +272,3 @@ module.exports = {
   deletePassedExam,
 };
 
-// const getEligibleExamForUser = async (req, res) => {
-//   try {
-//     const { userId } = req.params;
-
-//     const userProgress = await userPassSchema
-//       .find({ userId, pass: true })
-//       .select("subject subTopic level");
-
-//     let eligibleExams = new Map();
-
-//     for (let progress of userProgress) {
-//       const nextLevel = progress.level + 1;
-//       const prevLevel = progress.level - 1;
-//       const prevPrevLevel = progress.level - 2;
-//       if (prevLevel > 1 && prevLevel <= 4) {
-//         const data = await userPassSchema.findOne({
-//           userId,
-//           subject: progress.subject,
-//           subTopic: progress.subTopic,
-//           level: prevLevel,
-//           pass: true,
-//         });
-//         if (!data) {
-//           eligibleExams.set(`${progress.subject}-${progress.subTopic}`, {
-//             subjectId: progress.subject,
-//             subTopicId: progress.subTopic,
-//             level: prevLevel,
-//           });
-//         }
-//       }
-//       if (prevPrevLevel > 1 && prevPrevLevel <= 4) {
-//         const data = await userPassSchema.findOne({
-//           userId,
-//           subject: progress.subject,
-//           subTopic: progress.subTopic,
-//           level: prevPrevLevel,
-//           pass: true,
-//         });
-//         if (!data) {
-//           eligibleExams.set(`${progress.subject}-${progress.subTopic}`, {
-//             subjectId: progress.subject,
-//             subTopicId: progress.subTopic,
-//             level: prevPrevLevel,
-//           });
-//         }
-//       }
-//       if (nextLevel <= 4) {
-//         eligibleExams.set(`${progress.subject}-${progress.subTopic}`, {
-//           subjectId: progress.subject,
-//           subTopicId: progress.subTopic,
-//           level: nextLevel,
-//         });
-//       }
-//     }
-
-//     const allSubjects = await Subject.find().select("_id name subtopics");
-
-//     for (let subject of allSubjects) {
-//       for (let subTopic of subject.subtopics) {
-//         const key = `${subject._id}-${subTopic._id}`;
-//         if (!eligibleExams.has(key)) {
-//           eligibleExams.set(key, {
-//             subjectId: subject._id,
-//             subTopicId: subTopic._id,
-//             level: 1,
-//           });
-//         }
-//       }
-//     }
-
-//     const eligibleExamList = await Promise.all(
-//       Array.from(eligibleExams.values()).map(async (item) => {
-//         return examModel.find({
-//           subject: item.subjectId,
-//           subTopic: item.subTopicId,
-//           level: item.level,
-//           status: "active",
-//         });
-//       })
-//     );
-
-//     let flattenedExams = eligibleExamList.flat();
-
-//     flattenedExams = flattenedExams.map((exam) => {
-//       const subject = allSubjects.find((sub) => sub._id.equals(exam.subject));
-//       let subTopicName = "";
-//       if (subject) {
-//         const subTopic = subject.subtopics.find((st) =>
-//           st._id.equals(exam.subTopic)
-//         );
-//         if (subTopic) subTopicName = subTopic.name;
-//       }
-//       return {
-//         _id: exam._id,
-//         subjectId: exam.subject,
-//         subjectName: subject ? subject.name : null,
-//         subTopicId: exam.subTopic,
-//         subTopicName: subTopicName || null,
-//         questions: exam.questions,
-//         level: exam.level,
-//         status: exam.status,
-//         createdAt: exam.createdAt,
-//         updatedAt: exam.updatedAt,
-//         __v: exam.__v,
-//         examCode: exam.examCode,
-//         passPercentage: exam.passPercentage,
-//       };
-//     });
-
-//     res.status(200).json(flattenedExams);
-//   } catch (error) {
-//     res.status(500).json({
-//       success: false,
-//       message: "Failed to get eligible exams for the user",
-//       error: error.message,
-//     });
-//   }
-// };

@@ -69,6 +69,7 @@ app.set("trust proxy", 1);
   app.use("/api/duration", require("./routes/durationRoute"));
   app.use("/api/mark", require("./routes/markRoute"));
   app.use("/api/dashboard", require("./routes/dashboardRoute"));
+  app.use("/api/question-import", require("./routes/questionImportRoute"));
 
   if (require.main === module) {
     connectWithRetry();

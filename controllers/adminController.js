@@ -2,7 +2,7 @@ const { default: mongoose } = require("mongoose");
 const examSubmissionSchema = require("../models/examSubmissionSchema");
 const reviewModel = require("../models/ReviewModel");
 const userModel = require("../models/userModel");
-const userPassSchema = require("../models/userPassSchema");
+const examPassModel = require("../models/examPassModel");
 const sendMail = require("../utils/sendMail");
 
 const triggerMail = async (req, res) => {
@@ -60,7 +60,7 @@ const deleteUserEntirely = async (req, res) => {
 
     if (user.role === "student") {
       await examSubmissionSchema.deleteMany({ userId }, { session });
-      await userPassSchema.deleteMany({ userId }, { session });
+      await examPassModel.deleteMany({ userId }, { session });
     }
 
     if (user.role === "evaluator") {

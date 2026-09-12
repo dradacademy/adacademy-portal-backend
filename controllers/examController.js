@@ -2,7 +2,7 @@ const examModel = require("../models/examModel");
 const questionModel = require("../models/questionModel");
 const Subject = require("../models/subjectModel");
 const examSubmissionSchema = require("../models/examSubmissionSchema");
-const userPassSchema = require("../models/userPassSchema");
+const examPassModel = require("../models/examPassModel");
 const attemptCounterModel = require("../models/attemptCounterModel");
 const reviewModel = require("../models/ReviewModel");
 const { retryTransaction } = require("../utils/transactionHelper");
@@ -97,7 +97,6 @@ const createExam = async (req, res) => {
     const {
       subject,
       subTopic,
-      level,
       status,
       questions,
       passPercentage,
@@ -108,7 +107,6 @@ const createExam = async (req, res) => {
     if (
       !subject ||
       !subTopic ||
-      !level ||
       !status ||
       !questions ||
       !passPercentage
@@ -116,12 +114,17 @@ const createExam = async (req, res) => {
       return res.status(400).json({ error: "All fields are required" });
     }
 
-    const existingExam = await examModel.findOne({ subject, subTopic, level });
-    if (existingExam) {
-      return res.status(409).json({
-        error: "Exam with this subject, subTopic, and level already exists",
-      });
+    if (questions.some((q) => !q.level)) {
+      return res
+        .status(400)
+        .json({ error: "Every question must have a level" });
     }
+
+    // Auto-assign this exam's position in its subject+subTopic sequence.
+    const lastExam = await examModel
+      .findOne({ subject, subTopic })
+      .sort({ order: -1 });
+    const order = lastExam ? lastExam.order + 1 : 1;
 
     const examCode = await generateUniqueExamCode();
 
@@ -130,7 +133,10 @@ const createExam = async (req, res) => {
         questions.map((question) => ({
           subject,
           subTopic,
-          level,
+          level: question.level,
+          marks: question.marks ?? null,
+          negativeMark: question.negativeMark ?? null,
+          duration: question.duration ?? null,
           questionType: question.questionType,
           questionText: question.questionText,
           options: question.options,
@@ -216,7 +222,7 @@ const createExam = async (req, res) => {
           {
             subject,
             subTopic,
-            level,
+            order,
             status,
             passPercentage: passPercentage || 90,
             examCode,
@@ -328,7 +334,7 @@ const getAllExams = async (req, res) => {
         subjectId: subject?._id,
         subTopic: subTopic?.name || "Unknown Subtopic",
         subTopicId: subTopic?._id ?? null, // ← safe access
-        level: exam.level,
+        order: exam.order,
         status: exam.status,
         questions: exam.questions,
         poolQuestions: exam.poolQuestions,
@@ -352,7 +358,6 @@ const updateExam = async (req, res) => {
     const {
       subject,
       subTopic,
-      level,
       status,
       questions,
       passPercentage,
@@ -363,12 +368,17 @@ const updateExam = async (req, res) => {
     if (
       !subject ||
       !subTopic ||
-      !level ||
       !status ||
       !questions ||
       !passPercentage
     ) {
       return res.status(400).json({ error: "All fields are required" });
+    }
+
+    if (questions.some((q) => !q.level)) {
+      return res
+        .status(400)
+        .json({ error: "Every question must have a level" });
     }
 
     if (passPercentage < 0 || passPercentage > 100) {
@@ -406,14 +416,21 @@ const updateExam = async (req, res) => {
       const updatedQuestionIds = [];
 
       for (const question of questions) {
-        const existingQuestion = await questionModel
-          .findOne({
-            questionText: question.questionText,
-            level,
-            subject,
-            subTopic,
-          })
-          .session(session);
+        // Match by _id when the client already knows which question this
+        // is (e.g. editing an existing exam's question); this is more
+        // reliable than matching by text+level now that level/marks/
+        // duration are independently editable per question. Fall back to
+        // the old text+level match for legacy payloads without an _id.
+        const existingQuestion = question._id
+          ? await questionModel.findById(question._id).session(session)
+          : await questionModel
+              .findOne({
+                questionText: question.questionText,
+                level: question.level,
+                subject,
+                subTopic,
+              })
+              .session(session);
 
         if (existingQuestion) {
           await questionModel.findByIdAndUpdate(
@@ -421,6 +438,11 @@ const updateExam = async (req, res) => {
             {
               $set: {
                 questionType: question.questionType,
+                questionText: question.questionText,
+                level: question.level,
+                marks: question.marks ?? null,
+                negativeMark: question.negativeMark ?? null,
+                duration: question.duration ?? null,
                 options: question.options ?? existingQuestion.options,
                 correctAnswers: sanitizeCorrectAnswers(question),
                 image: question.image ?? existingQuestion.image,
@@ -437,7 +459,10 @@ const updateExam = async (req, res) => {
               {
                 subject,
                 subTopic,
-                level,
+                level: question.level,
+                marks: question.marks ?? null,
+                negativeMark: question.negativeMark ?? null,
+                duration: question.duration ?? null,
                 questionType: question.questionType,
                 questionText: question.questionText,
                 options: question.options,
@@ -520,7 +545,6 @@ const updateExam = async (req, res) => {
           $set: {
             subject,
             subTopic,
-            level,
             status,
             passPercentage: passPercentage || exam.passPercentage || 90,
             ...(examCode ? { examCode } : {}),
@@ -668,7 +692,7 @@ const getExamById = async (req, res) => {
         subjectId: subject?._id,
         subTopic: subTopic?.name || "Unknown Subtopic",
         subTopicId: subTopic?._id || null,
-        level: exam.level,
+        order: exam.order,
         status: exam.status,
         questions: exam.questions,
         examCode: exam.examCode,
@@ -707,17 +731,16 @@ const deleteExam = async (req, res) => {
       // Delete attempt counters for this exam
       await attemptCounterModel.deleteMany({ examId: id }, { session });
 
-      // Delete level-pass records for the exam's subject/subTopic/level
-      await userPassSchema.deleteMany(
-        { subject: exam.subject, subTopic: exam.subTopic, level: exam.level },
-        { session },
-      );
+      // Delete this exam's pass records (now keyed directly by examId,
+      // since level no longer identifies an exam uniquely).
+      await examPassModel.deleteMany({ examId: exam._id }, { session });
 
-      // Delete review records for the exam's subject/subTopic/level
-      await reviewModel.deleteMany(
-        { subject: exam.subject, subTopic: exam.subTopic, level: exam.level },
-        { session },
-      );
+      // NOTE: evaluator review records (ReviewModel) are still keyed by
+      // subject+subTopic+level, a percentage-range review-criteria config
+      // that isn't tied to one specific exam instance. Now that an exam no
+      // longer carries a single `level`, this cleanup can't be expressed
+      // correctly here — flagged as a follow-up (plan §8) to rekey/redesign
+      // ReviewModel. Intentionally left untouched on exam delete for now.
 
       // Delete ALL questions in the pool (not just the active set)
       await questionModel.deleteMany(

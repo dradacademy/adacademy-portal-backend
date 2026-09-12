@@ -53,19 +53,23 @@ describe('Exam Endpoints', () => {
                 questionText: 'Test Question',
                 options: ['A', 'B'],
                 correctAnswers: ['A'],
+                level: 1,
             }];
-            
+
             const reqBody = {
                 subject: 'MathId',
                 subTopic: 'AlgebraId',
-                level: 'Easy',
                 status: 'Active',
                 questions: mockQuestions,
                 passPercentage: 50
             };
 
             // Setup Mocks
-            examModel.findOne.mockResolvedValue(null);
+            // createExam now looks up the last exam in this subject+subTopic
+            // sequence (ordered by `order`) to auto-assign the new exam's order.
+            examModel.findOne.mockReturnValue({
+                sort: jest.fn().mockResolvedValue(null),
+            });
             questionModel.create.mockResolvedValue([{ _id: 'q1', ...mockQuestions[0] }]);
             examModel.create.mockResolvedValue({
                 _id: 'exam1',
@@ -102,7 +106,7 @@ describe('Exam Endpoints', () => {
           _id: 'exam1',
           subject: 'MathId',
           subTopic: 'AlgebraId',
-          level: 'Easy',
+          order: 1,
           status: 'Active',
           passPercentage: 50,
           examCode: 'ABCDE',

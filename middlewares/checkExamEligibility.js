@@ -1,4 +1,4 @@
-const userPassSchema = require("../models/userPassSchema");
+const examPassModel = require("../models/examPassModel");
 const examModel = require("../models/examModel");
 
 const checkExamEligibility = async (req, res, next) => {
@@ -32,15 +32,30 @@ const checkExamEligibility = async (req, res, next) => {
     exam.subjectName = exam.subject.name;
     exam.subtopicName = matchingSubtopic ? matchingSubtopic.name : null;
 
-    const userProgress = await userPassSchema.findOne({
-      userId,
-      subject: exam.subject,
-      subTopic: exam.subTopic,
-      level: exam.level - 1,
-      pass: true,
-    });
+    // Progression is now order-based: exam order 1 is always open; any
+    // later exam requires the exam immediately before it (order - 1, in
+    // the same subject+subTopic) to have been passed.
+    let isEligible = exam.order === 1;
 
-    if (exam.level === 1 || userProgress) {
+    if (!isEligible) {
+      const previousExam = await examModel
+        .findOne({
+          subject: exam.subject._id,
+          subTopic: exam.subTopic,
+          order: exam.order - 1,
+        })
+        .lean();
+
+      isEligible =
+        !previousExam || // previous slot missing (e.g. deleted) — fail open
+        !!(await examPassModel.findOne({
+          userId,
+          examId: previousExam._id,
+          pass: true,
+        }));
+    }
+
+    if (isEligible) {
       //  if (
       //       exam.questionSelection &&
       //       exam.questions &&

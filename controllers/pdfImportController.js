@@ -1,0 +1,210 @@
+const Anthropic = require("@anthropic-ai/sdk");
+
+// Lazily constructed so a missing ANTHROPIC_API_KEY doesn't crash the whole
+// server on boot — it only surfaces as a clean error the first time this
+// endpoint is actually called.
+let anthropicClient = null;
+const getAnthropicClient = () => {
+  if (!anthropicClient) {
+    if (!process.env.ANTHROPIC_API_KEY) {
+      const err = new Error("ANTHROPIC_API_KEY is not configured on the server.");
+      err.code = "MISSING_API_KEY";
+      throw err;
+    }
+    anthropicClient = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  }
+  return anthropicClient;
+};
+
+const ANTHROPIC_MODEL = process.env.ANTHROPIC_PDF_MODEL || "claude-sonnet-4-5-20250929";
+
+const EXTRACT_QUESTIONS_TOOL = {
+  name: "extract_questions",
+  description:
+    "Return every exam question found in the PDF question paper, in the same order they appear in the document.",
+  input_schema: {
+    type: "object",
+    properties: {
+      questions: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            questionType: {
+              type: "string",
+              enum: ["MCQ", "Fill in the Blanks", "MSQ", "Short Answer"],
+              description:
+                "MCQ = single correct option, MSQ = multiple correct options, Fill in the Blanks / Short Answer = no options.",
+            },
+            questionText: {
+              type: "string",
+              description:
+                "The exact question text, verbatim, with any math written as KaTeX-flavored LaTeX (e.g. x^{2}, \\frac{a}{b}, \\sqrt{x}, \\times) inline in the plain text — do not paraphrase or summarize.",
+            },
+            options: {
+              type: "array",
+              items: { type: "string" },
+              description:
+                "Only for MCQ/MSQ — the answer options verbatim, in order. Omit entirely for Fill in the Blanks / Short Answer.",
+            },
+            correctAnswers: {
+              type: "array",
+              items: { type: "string" },
+              description:
+                "The correct answer(s). For MCQ/MSQ, use the exact option text of the correct option(s). If an answer key is not present in the document, make a best-effort guess and never leave this empty.",
+            },
+            level: {
+              type: "integer",
+              enum: [1, 2, 3, 4],
+              description:
+                "Best-effort difficulty level from 1 (easiest) to 4 (hardest). Default to 2 when genuinely ambiguous.",
+            },
+            marks: {
+              type: "number",
+              description:
+                "Positive marks for this question, only if explicitly stated in the document. Omit if unknown — omission is safe and falls back to a level-based default.",
+            },
+            negativeMark: {
+              type: "number",
+              description:
+                "Negative marks for a wrong answer, only if explicitly stated in the document. Omit if unknown.",
+            },
+            duration: {
+              type: "number",
+              description:
+                "Suggested time budget in seconds for this question, only if explicitly stated or strongly implied by the document. Omit if unknown.",
+            },
+          },
+          required: ["questionType", "questionText", "correctAnswers", "level"],
+        },
+      },
+    },
+    required: ["questions"],
+  },
+};
+
+const EXTRACTION_PROMPT = `You are extracting exam questions from an arbitrary, unstructured PDF question paper so an admin can review and import them into an exam builder.
+
+Rules:
+- Extract every question in the document, in original order, regardless of layout (single/multi-column, tables, numbered lists, mixed sections).
+- Preserve exact wording — do not paraphrase, correct, or summarize question or option text.
+- Write any mathematical notation as KaTeX-flavored LaTeX inline in the plain text (e.g. "What is x^{2} when x=3?", "\\frac{a}{b}", "\\sqrt{x}", "\\times", "\\pi"). Do not use images or unicode math symbols for anything LaTeX can express.
+- Do not attempt to extract embedded diagrams, charts, or images as files. If a question references a diagram/image that is essential to answering it, say so plainly inside questionText (e.g. "[Diagram referenced — needs manual image attachment]") but still extract the rest of the question.
+- level, marks, negativeMark, and duration are best-effort. Only set marks/negativeMark/duration when the document actually states them (e.g. "2 marks each", "-1 for wrong answer", "90 seconds per question"); otherwise omit those fields entirely rather than guessing a number — omitting them is always safe. Default level to 2 when there's no basis to judge difficulty.
+- Call the extract_questions tool exactly once with the complete result. Do not include any other prose or commentary.`;
+
+const buildDraftQuestion = (q) => {
+  const isChoiceType = q.questionType === "MCQ" || q.questionType === "MSQ";
+  return {
+    questionType: q.questionType,
+    questionText: q.questionText,
+    options:
+      isChoiceType && Array.isArray(q.options)
+        ? q.options.map((text) => ({ text, image: null }))
+        : undefined,
+    correctAnswers: Array.isArray(q.correctAnswers)
+      ? q.correctAnswers
+      : q.correctAnswers != null
+      ? [String(q.correctAnswers)]
+      : [],
+    level: [1, 2, 3, 4].includes(q.level) ? q.level : 2,
+    marks: typeof q.marks === "number" ? q.marks : null,
+    negativeMark: typeof q.negativeMark === "number" ? q.negativeMark : null,
+    duration: typeof q.duration === "number" ? q.duration : null,
+    image: null,
+    answerKeyText: null,
+    answerKeyImage: null,
+  };
+};
+
+// Extracts structured draft questions from an admin-uploaded PDF question
+// paper using the Anthropic API. This never writes to the database — the
+// admin reviews/edits the returned draftQuestions client-side and only
+// explicit confirmation merges them into the normal exam create/update flow.
+const extractQuestionsFromPdf = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: "No PDF file uploaded." });
+    }
+
+    let client;
+    try {
+      client = getAnthropicClient();
+    } catch (err) {
+      if (err.code === "MISSING_API_KEY") {
+        console.error("PDF import called without ANTHROPIC_API_KEY configured.");
+        return res.status(500).json({
+          success: false,
+          message: "PDF import is not configured on the server yet. Please contact the administrator.",
+        });
+      }
+      throw err;
+    }
+
+    const base64Data = req.file.buffer.toString("base64");
+
+    let response;
+    try {
+      response = await client.messages.create({
+        model: ANTHROPIC_MODEL,
+        max_tokens: 8192,
+        tools: [EXTRACT_QUESTIONS_TOOL],
+        tool_choice: { type: "tool", name: "extract_questions" },
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "document",
+                source: {
+                  type: "base64",
+                  media_type: "application/pdf",
+                  data: base64Data,
+                },
+              },
+              {
+                type: "text",
+                text: EXTRACTION_PROMPT,
+              },
+            ],
+          },
+        ],
+      });
+    } catch (apiError) {
+      console.error("Anthropic API error during PDF question extraction:", apiError?.message || apiError);
+      return res.status(502).json({
+        success: false,
+        message: "Failed to reach the question-extraction service. Please try again.",
+      });
+    }
+
+    const toolUseBlock = (response.content || []).find(
+      (block) => block.type === "tool_use" && block.name === "extract_questions",
+    );
+
+    const extractedQuestions = toolUseBlock?.input?.questions;
+
+    if (!toolUseBlock || !Array.isArray(extractedQuestions) || extractedQuestions.length === 0) {
+      return res.status(422).json({
+        success: false,
+        message: "Could not extract any questions from this PDF. Please check the file and try again.",
+      });
+    }
+
+    const draftQuestions = extractedQuestions.map(buildDraftQuestion);
+
+    return res.status(200).json({
+      success: true,
+      message: `Extracted ${draftQuestions.length} question(s). Review and edit before adding them to the exam.`,
+      draftQuestions,
+    });
+  } catch (error) {
+    console.error("Error extracting questions from PDF:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong while extracting questions from the PDF.",
+    });
+  }
+};
+
+module.exports = { extractQuestionsFromPdf };

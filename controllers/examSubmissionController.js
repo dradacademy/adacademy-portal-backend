@@ -2,13 +2,15 @@ const { default: mongoose } = require("mongoose");
 const examModel = require("../models/examModel");
 const examSubmissionSchema = require("../models/examSubmissionSchema");
 const userModel = require("../models/userModel");
-const userPassSchema = require("../models/userPassSchema");
+const examPassModel = require("../models/examPassModel");
 const sendMail = require("../utils/sendMail");
 const markModel = require("../models/markModel");
 const { ensureMarkConfigExists } = require("./markController");
 const {
   evaluateQuestion,
   calculateMarks,
+  resolveQuestionMarks,
+  resolveQuestionDuration,
   calculateTotalPossibleMarks,
   validateMarks,
 } = require("../utils/ExamSubmissionHelper");
@@ -23,11 +25,20 @@ const getAllPassedSubmission = async (req, res) => {
       })
       .populate({
         path: "examId",
-        select: "subject subTopic level examCode passPercentage",
-        populate: {
-          path: "subject",
-          select: "name",
-        },
+        select: "subject subTopic order examCode passPercentage questions",
+        populate: [
+          {
+            path: "subject",
+            select: "name",
+          },
+          {
+            // Needed so the frontend can compute total possible marks by
+            // summing each question's own resolved marks, instead of the
+            // old (now-incorrect) uniform per-level assumption.
+            path: "questions",
+            select: "level marks negativeMark",
+          },
+        ],
       })
       .populate("userId");
 
@@ -83,11 +94,20 @@ const getPassedSubmissionForUser = async (req, res) => {
       })
       .populate({
         path: "examId",
-        select: "subject subTopic level examCode passPercentage",
-        populate: {
-          path: "subject",
-          select: "name",
-        },
+        select: "subject subTopic order examCode passPercentage questions",
+        populate: [
+          {
+            path: "subject",
+            select: "name",
+          },
+          {
+            // Needed so the frontend can compute total possible marks by
+            // summing each question's own resolved marks, instead of the
+            // old (now-incorrect) uniform per-level assumption.
+            path: "questions",
+            select: "level marks negativeMark",
+          },
+        ],
       });
 
     for (let submission of passedData) {
@@ -126,11 +146,20 @@ const getAllPreviousAttempt = async (req, res) => {
       })
       .populate({
         path: "examId",
-        select: "subject subTopic level examCode passPercentage",
-        populate: {
-          path: "subject",
-          select: "name",
-        },
+        select: "subject subTopic order examCode passPercentage questions",
+        populate: [
+          {
+            path: "subject",
+            select: "name",
+          },
+          {
+            // Needed so the frontend can compute total possible marks by
+            // summing each question's own resolved marks, instead of the
+            // old (now-incorrect) uniform per-level assumption.
+            path: "questions",
+            select: "level marks negativeMark",
+          },
+        ],
       })
       .populate("userId")
       .sort({ createdAt: -1 });
@@ -187,11 +216,20 @@ const getPreviousAttemptForUser = async (req, res) => {
       })
       .populate({
         path: "examId",
-        select: "subject subTopic level examCode passPercentage",
-        populate: {
-          path: "subject",
-          select: "name",
-        },
+        select: "subject subTopic order examCode passPercentage questions",
+        populate: [
+          {
+            path: "subject",
+            select: "name",
+          },
+          {
+            // Needed so the frontend can compute total possible marks by
+            // summing each question's own resolved marks, instead of the
+            // old (now-incorrect) uniform per-level assumption.
+            path: "questions",
+            select: "level marks negativeMark",
+          },
+        ],
       })
       .sort({ createdAt: -1 });
 
@@ -241,11 +279,20 @@ const getExamSubmissionById = async (req, res) => {
       .findById(examSubmissionId)
       .populate({
         path: "examId",
-        select: "subject subTopic level examCode passPercentage",
-        populate: {
-          path: "subject",
-          select: "name",
-        },
+        select: "subject subTopic order examCode passPercentage questions",
+        populate: [
+          {
+            path: "subject",
+            select: "name",
+          },
+          {
+            // Needed so the frontend can compute total possible marks by
+            // summing each question's own resolved marks, instead of the
+            // old (now-incorrect) uniform per-level assumption.
+            path: "questions",
+            select: "level marks negativeMark",
+          },
+        ],
       })
       .populate({
         path: "examData",
@@ -373,24 +420,15 @@ const submitExam = async (req, res) => {
       const durationConfig = await durationModel
         .findById("duration-in-seconds")
         .session(session);
-      let perQuestionDuration = 0;
-      if (durationConfig) {
-        if (examDetails.level === 1)
-          perQuestionDuration = durationConfig.level1Duration;
-        else if (examDetails.level === 2)
-          perQuestionDuration = durationConfig.level2Duration;
-        else if (examDetails.level === 3)
-          perQuestionDuration = durationConfig.level3Duration;
-        else if (examDetails.level === 4)
-          perQuestionDuration = durationConfig.level4Duration;
-      }
 
-      // Fallback if config missing
-      if (!perQuestionDuration) perQuestionDuration = 3600; // Default 1 hour
-
-      // CRITICAL FIX: Calculate TOTAL exam duration (not per-question)
-      // This must match the frontend calculation in examFunctionRoute.js
-      const allowedDuration = examDetails.questions.length * perQuestionDuration;
+      // CRITICAL FIX: Calculate TOTAL exam duration by summing each
+      // question's own resolved duration (per-question override, or
+      // level-based fallback). This must match the frontend calculation
+      // in examFunctionRoute.js.
+      const allowedDuration = examDetails.questions.reduce(
+        (sum, q) => sum + resolveQuestionDuration(q, durationConfig),
+        0
+      );
 
       const startTime = new Date(existingSubmission.createdAt).getTime();
       const currentTime = Date.now();
@@ -416,20 +454,6 @@ const submitExam = async (req, res) => {
         await ensureMarkConfigExists();
       }
 
-      let positiveMark = mark.level1Mark,
-        negativeMark = mark.level1NegativeMark;
-
-      if (examDetails.level === 2) {
-        positiveMark = mark.level2Mark;
-        negativeMark = mark.level2NegativeMark;
-      } else if (examDetails.level === 3) {
-        positiveMark = mark.level3Mark;
-        negativeMark = mark.level3NegativeMark;
-      } else if (examDetails.level === 4) {
-        positiveMark = mark.level4Mark;
-        negativeMark = mark.level4NegativeMark;
-      }
-
       // 5. Create question lookup map ONCE (O(n) instead of O(n²))
       const questionMap = new Map(
         examDetails.questions.map((q) => [q._id.toString(), q])
@@ -442,24 +466,25 @@ const submitExam = async (req, res) => {
         return evaluateQuestion(question, studQuestion);
       });
 
-      // 7. Calculate marks (O(n) with Map lookup)
+      // 7. Calculate marks (O(n) with Map lookup), resolving each
+      // question's own marks/negativeMark (falling back to the level-based
+      // config when the question doesn't override them)
       const studentObtainedMarks = submissionData.examData.reduce(
         (total, studQuestion) => {
           const question = questionMap.get(studQuestion.questionId); // O(1) lookup!
           if (!question) return total;
 
-          return (
-            total +
-            calculateMarks(question, studQuestion, positiveMark, negativeMark)
-          );
+          const { positive, negative } = resolveQuestionMarks(question, mark);
+
+          return total + calculateMarks(question, studQuestion, positive, negative);
         },
         0
       );
 
-      // 8. Calculate total possible marks and pass mark (FIXED FORMULA)
+      // 8. Calculate total possible marks and pass mark (per-question sum)
       const totalPossibleMarks = calculateTotalPossibleMarks(
-        submissionData.examData.length,
-        positiveMark
+        examDetails.questions,
+        mark
       );
       const passMark = (examDetails.passPercentage / 100) * totalPossibleMarks;
 
@@ -488,16 +513,19 @@ const submitExam = async (req, res) => {
         existingSubmission._shouldNotifyEvaluators = true;
       }
 
-      // 12. Create/Update UserPass record if passed (use upsert to prevent duplicates)
+      // 12. Create/Update ExamPass record if passed (use upsert to prevent duplicates)
       if (existingSubmission.pass) {
-        await userPassSchema.findOneAndUpdate(
+        await examPassModel.findOneAndUpdate(
           {
             userId: submissionData.userId,
+            examId: examDetails._id,
+          },
+          {
+            pass: true,
             subject: examDetails.subject,
             subTopic: examDetails.subTopic,
-            level: examDetails.level,
+            order: examDetails.order,
           },
-          { pass: true },
           { upsert: true, session }
         );
       }
@@ -522,7 +550,7 @@ const submitExam = async (req, res) => {
             const userDetail = await userModel.findById(submissionData.userId);
 
             const subject = `Student Repeated Exam Attempts: ${userDetail.username}`;
-            const text = `The user ${userDetail.username} (Email: ${userDetail.email}) has attempted the exam ${result.submission.attemptNumber} times but has not yet passed. Exam Details: Subject - ${result.examDetails.subject.name}, Subtopic - ${result.examDetails.subTopic.name}, Level - ${result.examDetails.level}.`;
+            const text = `The user ${userDetail.username} (Email: ${userDetail.email}) has attempted the exam ${result.submission.attemptNumber} times but has not yet passed. Exam Details: Subject - ${result.examDetails.subject.name}, Subtopic - ${result.examDetails.subTopic.name}, Order - ${result.examDetails.order}.`;
             const html = `
             <h2>Exam Attempt Alert</h2>
             <p>The student <strong>${userDetail.username}</strong> has attempted the exam <strong>${result.submission.attemptNumber} times</strong> but has not yet passed.</p>
@@ -530,7 +558,7 @@ const submitExam = async (req, res) => {
             <ul>
               <li><strong>Subject:</strong> ${result.examDetails.subject.name}</li>
               <li><strong>Subtopic:</strong> ${result.examDetails.subTopic.name}</li>
-              <li><strong>Level:</strong> ${result.examDetails.level}</li>
+              <li><strong>Order:</strong> ${result.examDetails.order}</li>
             </ul>
             <p>Please review the student's progress.</p>
           `;
@@ -611,11 +639,20 @@ const submitReviewForExamSubmission = async (req, res) => {
       .populate("reviews.evaluator", "username email")
       .populate({
         path: "examId",
-        select: "subject subTopic level examCode passPercentage",
-        populate: {
-          path: "subject",
-          select: "name",
-        },
+        select: "subject subTopic order examCode passPercentage questions",
+        populate: [
+          {
+            path: "subject",
+            select: "name",
+          },
+          {
+            // Needed so the frontend can compute total possible marks by
+            // summing each question's own resolved marks, instead of the
+            // old (now-incorrect) uniform per-level assumption.
+            path: "questions",
+            select: "level marks negativeMark",
+          },
+        ],
       })
       .populate({
         path: "userId",
@@ -679,11 +716,20 @@ const updateCommentInExamSubmission = async (req, res) => {
       .populate("reviews.evaluator", "username email")
       .populate({
         path: "examId",
-        select: "subject subTopic level examCode passPercentage",
-        populate: {
-          path: "subject",
-          select: "name",
-        },
+        select: "subject subTopic order examCode passPercentage questions",
+        populate: [
+          {
+            path: "subject",
+            select: "name",
+          },
+          {
+            // Needed so the frontend can compute total possible marks by
+            // summing each question's own resolved marks, instead of the
+            // old (now-incorrect) uniform per-level assumption.
+            path: "questions",
+            select: "level marks negativeMark",
+          },
+        ],
       })
       .populate({
         path: "userId",
@@ -746,11 +792,20 @@ const deleteCommentInExamSubmission = async (req, res) => {
       .populate("reviews.evaluator", "username email")
       .populate({
         path: "examId",
-        select: "subject subTopic level examCode passPercentage",
-        populate: {
-          path: "subject",
-          select: "name",
-        },
+        select: "subject subTopic order examCode passPercentage questions",
+        populate: [
+          {
+            path: "subject",
+            select: "name",
+          },
+          {
+            // Needed so the frontend can compute total possible marks by
+            // summing each question's own resolved marks, instead of the
+            // old (now-incorrect) uniform per-level assumption.
+            path: "questions",
+            select: "level marks negativeMark",
+          },
+        ],
       })
       .populate({
         path: "userId",
