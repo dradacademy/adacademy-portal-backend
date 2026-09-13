@@ -39,13 +39,13 @@ const EXTRACT_QUESTIONS_TOOL = {
             questionText: {
               type: "string",
               description:
-                "The exact question text, verbatim, with any math written as KaTeX-flavored LaTeX (e.g. x^{2}, \\frac{a}{b}, \\sqrt{x}, \\times) inline in the plain text — do not paraphrase or summarize.",
+                "The exact question text, verbatim — do not paraphrase or summarize. Any math must be written as KaTeX-flavored LaTeX and every complete math expression must be wrapped in \\( \\) delimiters (e.g. \"What is \\(x^{2}\\) when \\(x=3\\)?\", \"the equation reduces to \\(\\frac{d^{2}H}{dz^{2}} = 0\\)\"). Use proper LaTeX constructs for compound expressions instead of ASCII shorthand — \\frac{a}{b} not a/b, \\sqrt{x} not sqrt(x), \\times not x for multiplication — so a whole expression parses as one unit rather than a chain of loose symbols. A fill-in-the-blank marker (e.g. ____) is plain text, never wrapped in math delimiters.",
             },
             options: {
               type: "array",
               items: { type: "string" },
               description:
-                "Only for MCQ/MSQ — the answer options verbatim, in order. Omit entirely for Fill in the Blanks / Short Answer.",
+                "Only for MCQ/MSQ — the answer options verbatim, in order. Omit entirely for Fill in the Blanks / Short Answer. Any math in an option must follow the exact same rule as questionText: KaTeX LaTeX wrapped in \\( \\) delimiters, real LaTeX constructs (\\frac, \\partial, \\sqrt, etc.), never raw Unicode math characters (no ², ³, ∂, √, × typed directly — always \\partial, \\sqrt{}, \\times inside \\( \\)). A short numeric or plain-text option like \"2\" or \"True\" needs no delimiters at all.",
             },
             correctAnswers: {
               type: "array",
@@ -88,7 +88,7 @@ const EXTRACTION_PROMPT = `You are extracting exam questions from an arbitrary, 
 Rules:
 - Extract every question in the document, in original order, regardless of layout (single/multi-column, tables, numbered lists, mixed sections).
 - Preserve exact wording — do not paraphrase, correct, or summarize question or option text.
-- Write any mathematical notation as KaTeX-flavored LaTeX inline in the plain text (e.g. "What is x^{2} when x=3?", "\\frac{a}{b}", "\\sqrt{x}", "\\times", "\\pi"). Do not use images or unicode math symbols for anything LaTeX can express.
+- Write any mathematical notation as KaTeX-flavored LaTeX, and wrap every complete math expression in \\( \\) delimiters, e.g. "What is \\(x^{2}\\) when \\(x=3\\)?", "the equation reduces to \\(\\frac{d^{2}H}{dz^{2}} = 0\\), where...". This rule applies identically everywhere math appears — the question stem AND every answer option — never treat options as plain text by default just because they're short. Never leave bare LaTeX commands or sub/superscripts floating undelimited in the prose — the delimiters are what let the exam viewer tell math apart from ordinary text reliably. Use real LaTeX constructs for anything compound (\\frac{a}{b} for a fraction or derivative, \\partial for ∂, \\sqrt{x}, \\times, \\pi, \\alpha, etc.) rather than ASCII approximations or raw Unicode math characters (never type ², ³, ∂, √, × literally — always the LaTeX command inside \\( \\)) — a whole expression should be one delimited unit, not several bare symbols side by side, and never a mix of LaTeX commands and literal Unicode symbols in the same expression. Do not use images or unicode math symbols for anything LaTeX can express. A fill-in-the-blank marker (e.g. a line of underscores) is plain text and must never be placed inside math delimiters. A short plain-text/numeric option (e.g. "True", "2") needs no math treatment at all.
 - Do not attempt to extract embedded diagrams, charts, or images as files. If a question references a diagram/image that is essential to answering it, say so plainly inside questionText (e.g. "[Diagram referenced — needs manual image attachment]") but still extract the rest of the question.
 - level, marks, negativeMark, and duration are best-effort. Only set marks/negativeMark/duration when the document actually states them (e.g. "2 marks each", "-1 for wrong answer", "90 seconds per question"); otherwise omit those fields entirely rather than guessing a number — omitting them is always safe. Default level to 2 when there's no basis to judge difficulty.
 - Call the extract_questions tool exactly once with the complete result. Do not include any other prose or commentary.`;
