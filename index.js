@@ -7,6 +7,7 @@ const {
   authLimiter,
   submissionLimiter,
   generalLimiter,
+  leadLimiter,
 } = require("./middlewares/rateLimiter");
 
 // Import Node.js core modules for clustering
@@ -70,6 +71,18 @@ app.set("trust proxy", 1);
   app.use("/api/mark", require("./routes/markRoute"));
   app.use("/api/dashboard", require("./routes/dashboardRoute"));
   app.use("/api/question-import", require("./routes/questionImportRoute"));
+  app.use(
+    "/api/enrollment-leads",
+    leadLimiter,
+    require("./routes/enrollmentLeadRoute"),
+  );
+
+  // Plain server-side redirects (not under /api — these are meant to be
+  // full-page browser navigations from a link/button click, not AJAX calls).
+  // Each exam category's "test portal" is, for now, the same shared app —
+  // see routes/portalRoute.js for the placeholder-URL env vars to swap in
+  // once any category gets its own dedicated subdomain/engine.
+  app.use("/portal", require("./routes/portalRoute"));
 
   if (require.main === module) {
     connectWithRetry();

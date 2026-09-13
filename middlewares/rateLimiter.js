@@ -41,9 +41,23 @@ const pdfImportLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+// Public "Enroll Now" lead form — no login required, so keep it tight
+// enough to deter spam/bot submissions without blocking a real family
+// submitting the form more than once.
+const leadLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000, // 10 minutes
+  max: 10, // Limit each IP to 10 lead submissions per 10 minutes
+  message: {
+    error: "Too many submissions, please try again later or call/WhatsApp us directly",
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 module.exports = {
   authLimiter,
   submissionLimiter,
   generalLimiter,
   pdfImportLimiter,
+  leadLimiter,
 };
