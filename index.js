@@ -71,6 +71,7 @@ app.set("trust proxy", 1);
   app.use("/api/mark", require("./routes/markRoute"));
   app.use("/api/dashboard", require("./routes/dashboardRoute"));
   app.use("/api/question-import", require("./routes/questionImportRoute"));
+  app.use("/api/test-tracking", require("./routes/testTrackingRoute"));
   app.use(
     "/api/enrollment-leads",
     leadLimiter,

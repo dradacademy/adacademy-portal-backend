@@ -56,6 +56,15 @@ const ExamSubmissionSchema = new mongoose.Schema(
       enum: ["started", "completed"],
       default: "completed", // Default to completed for backward compatibility
     },
+    // Explicit timestamp for when this submission was graded/completed.
+    // Deliberately separate from `updatedAt`, which also shifts whenever a
+    // review is added later — completedAt is set once, at submit time, and
+    // never touched again, so it's safe to use for "attended date" and
+    // on-time/late tracking in the Test Tracking dashboards.
+    completedAt: {
+      type: Date,
+      default: null,
+    },
     reviews: [
       {
         evaluator: {

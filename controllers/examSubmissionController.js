@@ -604,6 +604,7 @@ const submitExam = async (req, res) => {
       existingSubmission.examData = enhancedExamData;
       existingSubmission.pass = validatedMarks >= passMark;
       existingSubmission.status = "completed";
+      existingSubmission.completedAt = new Date();
 
       await existingSubmission.save({ session });
 

@@ -90,6 +90,25 @@ const examSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       default: null,
     },
+    // Tentative/planned date the admin intends students to take this test
+    // by. Purely informational (doesn't gate attempts) — used to classify
+    // a completed submission as on-time (completed on/before this date) vs
+    // late, and shown as "Scheduled Date" in the Test Tracking dashboards.
+    // Null means no schedule has been set for this exam.
+    scheduledDate: {
+      type: Date,
+      default: null,
+    },
+    // The date this exam first became visible/available to students, i.e.
+    // the first time its status transitioned to "active" (set once, never
+    // overwritten by later re-activations — see examController.js). Null
+    // if it has never been activated yet. Distinct from `createdAt`
+    // ("posted date" — when the admin first built the test), since an
+    // exam can be created inactive/draft and activated later.
+    publishedAt: {
+      type: Date,
+      default: null,
+    },
   },
   {
     timestamps: true,

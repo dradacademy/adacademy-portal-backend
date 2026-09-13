@@ -206,6 +206,7 @@ const manuallyPassExam = async (req, res) => {
       obtainedMark,
       examData: enhancedExamData,
       pass: true,
+      completedAt: new Date(),
     });
 
     await examPassModel.findOneAndUpdate(

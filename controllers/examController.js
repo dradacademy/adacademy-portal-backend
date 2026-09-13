@@ -102,6 +102,7 @@ const createExam = async (req, res) => {
       passPercentage,
       questionSelection,
       questionSets,
+      scheduledDate,
     } = req.body;
 
     if (
@@ -224,6 +225,9 @@ const createExam = async (req, res) => {
             subTopic,
             order,
             status,
+            scheduledDate: scheduledDate || null,
+            // Test is visible to students the moment it's created active.
+            publishedAt: status === "active" ? new Date() : null,
             passPercentage: passPercentage || 90,
             examCode,
             poolQuestions: createdQuestions.map((q) => q._id), // Full question pool
@@ -343,6 +347,9 @@ const getAllExams = async (req, res) => {
         passPercentage: exam.passPercentage,
         examCode: exam.examCode,
         shuffleQuestion: exam.shuffleQuestion,
+        scheduledDate: exam.scheduledDate,
+        publishedAt: exam.publishedAt,
+        createdAt: exam.createdAt,
       };
     });
 
@@ -363,6 +370,7 @@ const updateExam = async (req, res) => {
       passPercentage,
       questionSelection,
       examCode,
+      scheduledDate,
     } = req.body;
 
     if (
@@ -539,6 +547,15 @@ const updateExam = async (req, res) => {
 
       // ── Persist all changes atomically ────────────────────────────────────
       // ✅ Single findByIdAndUpdate instead of multiple exam.save({ session }) calls
+      // First time this exam is ever set to "active", stamp publishedAt —
+      // the "date made available to students" tracked in the Test Tracking
+      // dashboards. Never overwritten by a later re-activation, and never
+      // cleared by deactivating, so it always reflects the original date.
+      const publishedAtUpdate =
+        status === "active" && !exam.publishedAt
+          ? { publishedAt: new Date() }
+          : {};
+
       await examModel.findByIdAndUpdate(
         examId,
         {
@@ -546,6 +563,9 @@ const updateExam = async (req, res) => {
             subject,
             subTopic,
             status,
+            scheduledDate:
+              scheduledDate !== undefined ? scheduledDate || null : exam.scheduledDate,
+            ...publishedAtUpdate,
             passPercentage: passPercentage || exam.passPercentage || 90,
             ...(examCode ? { examCode } : {}),
             poolQuestions: updatedQuestionIds,
