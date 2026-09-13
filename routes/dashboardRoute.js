@@ -4,6 +4,7 @@ const {
   getExamDetailedAnalysis,
   getStudentDetailedAnalysis,
   getAllStudentsOverview,
+  getTopicPerformanceOverview,
 } = require("../controllers/dashboardController");
 const {
   verifyToken,
@@ -35,6 +36,12 @@ router.get(
   verifyToken,
   authorizeRoles("admin"),
   getStudentDetailedAnalysis
+);
+router.get(
+  "/topics/overview",
+  verifyToken,
+  authorizeRoles("admin"),
+  getTopicPerformanceOverview
 );
 
 module.exports = router;

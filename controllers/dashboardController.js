@@ -923,13 +923,81 @@ const getStudentDetailedAnalysis = async (req, res) => {
         };
       });
 
-    const groupedBySubject = {};
+    // Group completed exams into Subject -> Topic (subtopic) rollups. Each
+    // topic aggregates its own attempt summary (correct/wrong/partial/
+    // skipped) and average percentage across just that topic's exams — so
+    // the admin can see how a student is doing on one specific topic, not
+    // only a whole subject or the flat per-exam list.
+    const topicMap = new Map(); // key: `${subject}|${subTopic}`
 
     examSummary.forEach((exam) => {
-      if (!groupedBySubject[exam.subject]) {
-        groupedBySubject[exam.subject] = [];
+      const key = `${exam.subject}|${exam.subTopic}`;
+      if (!topicMap.has(key)) {
+        topicMap.set(key, {
+          subject: exam.subject,
+          subTopic: exam.subTopic,
+          exams: [],
+          correct: 0,
+          wrong: 0,
+          partial: 0,
+          skipped: 0,
+          totalPercentage: 0,
+        });
       }
-      groupedBySubject[exam.subject].push(exam);
+      const t = topicMap.get(key);
+      t.exams.push(exam);
+      t.correct += exam.correct;
+      t.wrong += exam.wrong;
+      t.partial += exam.partial;
+      t.skipped += exam.skipped;
+      t.totalPercentage += exam.percentage;
+    });
+
+    const topicSummaries = Array.from(topicMap.values()).map((t) => {
+      const totalAnswered = t.correct + t.wrong + t.partial + t.skipped;
+      return {
+        subject: t.subject,
+        subTopic: t.subTopic,
+        examsCount: t.exams.length,
+        avgPercentage: Number(
+          (t.totalPercentage / t.exams.length).toFixed(2),
+        ),
+        attemptSummary: {
+          correct: t.correct,
+          wrong: t.wrong,
+          partial: t.partial,
+          skipped: t.skipped,
+          correctPercentage:
+            totalAnswered > 0
+              ? Number(((t.correct / totalAnswered) * 100).toFixed(1))
+              : 0,
+          wrongPercentage:
+            totalAnswered > 0
+              ? Number(((t.wrong / totalAnswered) * 100).toFixed(1))
+              : 0,
+          partialPercentage:
+            totalAnswered > 0
+              ? Number(((t.partial / totalAnswered) * 100).toFixed(1))
+              : 0,
+          skippedPercentage:
+            totalAnswered > 0
+              ? Number(((t.skipped / totalAnswered) * 100).toFixed(1))
+              : 0,
+        },
+        exams: t.exams,
+      };
+    });
+
+    // examGroupedBySubject now maps subject name -> array of topic
+    // (subtopic) summaries, each carrying its own attempt summary and exam
+    // list (was previously a flat subject -> exams list with no topic
+    // rollup).
+    const groupedBySubject = {};
+    topicSummaries.forEach((topic) => {
+      if (!groupedBySubject[topic.subject]) {
+        groupedBySubject[topic.subject] = [];
+      }
+      groupedBySubject[topic.subject].push(topic);
     });
 
     const subjectChart = {};
@@ -948,6 +1016,15 @@ const getStudentDetailedAnalysis = async (req, res) => {
         percentage: val.total / val.count,
       }),
     );
+
+    // Topic (subtopic)-level chart data — a finer-grained view than the
+    // subject-level chart above, since one subject can contain several
+    // topics with very different performance.
+    const topicChartData = topicSummaries.map((t) => ({
+      topic: t.subTopic,
+      subject: t.subject,
+      percentage: t.avgPercentage,
+    }));
 
     // D. Attempt Summary
     let correctCount = 0;
@@ -1020,6 +1097,19 @@ const getStudentDetailedAnalysis = async (req, res) => {
       percentage: 0,
     };
 
+    // Topic (subtopic)-level strongest/weakest — a more actionable insight
+    // than subject-level alone, since a student can be strong in most of a
+    // subject but weak on one specific topic within it.
+    const sortedTopics = [...topicChartData].sort(
+      (a, b) => b.percentage - a.percentage,
+    );
+
+    const strongestTopic = sortedTopics[0] || { topic: "N/A", percentage: 0 };
+    const weakestTopic = sortedTopics[sortedTopics.length - 1] || {
+      topic: "N/A",
+      percentage: 0,
+    };
+
     const keyInsights = {
       strongestSubject: {
         name: strongestSubject.subject,
@@ -1028,6 +1118,14 @@ const getStudentDetailedAnalysis = async (req, res) => {
       weakestSubject: {
         name: weakestSubject.subject,
         percentage: weakestSubject.percentage,
+      },
+      strongestTopic: {
+        name: strongestTopic.topic,
+        percentage: strongestTopic.percentage,
+      },
+      weakestTopic: {
+        name: weakestTopic.topic,
+        percentage: weakestTopic.percentage,
       },
     };
 
@@ -1038,6 +1136,7 @@ const getStudentDetailedAnalysis = async (req, res) => {
         basicDetails,
         overallPerformance,
         subjectChartData,
+        topicChartData,
         attemptSummary,
         keyInsights,
       },
@@ -1052,9 +1151,161 @@ const getStudentDetailedAnalysis = async (req, res) => {
   }
 };
 
+// Get topic (subject + subtopic) performance overview — for every topic
+// that has at least one completed submission, who the top and weakest
+// performing students are and the class average, so the admin's Exam
+// Dashboard can show "who's leading / who's struggling" per topic instead
+// of only per individual exam.
+const getTopicPerformanceOverview = async (req, res) => {
+  try {
+    const subjectMatch = {};
+    if (req.query.category) {
+      subjectMatch.category = req.query.category;
+    }
+
+    const subjects = await Subject.find(subjectMatch).lean();
+    if (subjects.length === 0) {
+      return res.status(200).json({ success: true, data: { topics: [] } });
+    }
+
+    const subjectIds = subjects.map((s) => s._id);
+    const exams = await Exam.find({ subject: { $in: subjectIds } })
+      .select("_id subject subTopic")
+      .lean();
+
+    if (exams.length === 0) {
+      return res.status(200).json({ success: true, data: { topics: [] } });
+    }
+
+    const examIds = exams.map((e) => e._id);
+    const markData = await markModel.findById("mark-based-on-levels");
+    if (!markData) {
+      throw new Error("Mark configuration not found");
+    }
+
+    const submissions = await ExamSubmission.find({
+      examId: { $in: examIds },
+      status: "completed",
+    })
+      .populate({
+        path: "examId",
+        select: "subject subTopic questions",
+        populate: { path: "questions" },
+      })
+      .populate("userId", "username email")
+      .lean();
+
+    // key: `${subjectId}|${subTopicId}`
+    const topicMap = new Map();
+
+    submissions.forEach((sub) => {
+      if (!sub.examId || !sub.examId.subject || !sub.examId.subTopic) return;
+      const subject = subjects.find(
+        (s) => s._id.toString() === sub.examId.subject.toString(),
+      );
+      if (!subject) return;
+
+      const subTopicIdStr = sub.examId.subTopic.toString();
+      const subtopicObj = (subject.subtopics || []).find(
+        (st) => st._id.toString() === subTopicIdStr,
+      );
+
+      const key = `${subject._id}|${subTopicIdStr}`;
+      if (!topicMap.has(key)) {
+        topicMap.set(key, {
+          subjectId: subject._id,
+          subjectName: subject.name,
+          subTopicId: sub.examId.subTopic,
+          subTopicName: subtopicObj?.name || "Unknown",
+          category: subject.category,
+          studentTotals: new Map(),
+        });
+      }
+
+      const topic = topicMap.get(key);
+      const totalMarks = calculateTotalPossibleMarks(
+        sub.examId.questions || [],
+        markData,
+      );
+      const pct = totalMarks > 0 ? (sub.obtainedMark / totalMarks) * 100 : 0;
+
+      const studentId = sub.userId?._id?.toString();
+      if (!studentId) return;
+
+      if (!topic.studentTotals.has(studentId)) {
+        topic.studentTotals.set(studentId, {
+          name: sub.userId.username,
+          email: sub.userId.email,
+          totalPct: 0,
+          count: 0,
+        });
+      }
+      const entry = topic.studentTotals.get(studentId);
+      entry.totalPct += pct;
+      entry.count += 1;
+    });
+
+    const topics = Array.from(topicMap.values()).map((topic) => {
+      const studentAverages = Array.from(topic.studentTotals.entries()).map(
+        ([studentId, v]) => ({
+          studentId,
+          name: v.name,
+          email: v.email,
+          avgPercentage: Number((v.totalPct / v.count).toFixed(2)),
+          examsCount: v.count,
+        }),
+      );
+      studentAverages.sort((a, b) => b.avgPercentage - a.avgPercentage);
+
+      const classAverage =
+        studentAverages.length > 0
+          ? Number(
+              (
+                studentAverages.reduce((sum, s) => sum + s.avgPercentage, 0) /
+                studentAverages.length
+              ).toFixed(2),
+            )
+          : 0;
+
+      return {
+        subjectId: topic.subjectId,
+        subjectName: topic.subjectName,
+        subTopicId: topic.subTopicId,
+        subTopicName: topic.subTopicName,
+        category: topic.category,
+        totalStudents: studentAverages.length,
+        classAverage,
+        topPerformer: studentAverages[0] || null,
+        // Only show a separate "weakest" performer when there's more than
+        // one student — otherwise the same lone student would show up as
+        // both top and weakest, which reads as a bug rather than a signal.
+        weakestPerformer:
+          studentAverages.length > 1
+            ? studentAverages[studentAverages.length - 1]
+            : null,
+      };
+    });
+
+    topics.sort((a, b) => b.classAverage - a.classAverage);
+
+    res.status(200).json({
+      success: true,
+      data: { topics },
+    });
+  } catch (error) {
+    console.error("Error fetching topic performance overview:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error fetching topic performance overview",
+      error: error.message,
+    });
+  }
+};
+
 module.exports = {
   getAllExamsOverview,
   getExamDetailedAnalysis,
   getAllStudentsOverview,
   getStudentDetailedAnalysis,
+  getTopicPerformanceOverview,
 };
