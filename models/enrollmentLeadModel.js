@@ -17,11 +17,23 @@ const enrollmentLeadSchema = new mongoose.Schema(
       trim: true,
       maxlength: 20,
     },
+    // Not required at the schema level — a quick "Request a Callback"
+    // submission (source: "callback_request") intentionally skips this
+    // field to keep that flow to just name + mobile. The controller still
+    // requires it for the full "enroll_form" submission.
     targetExam: {
       type: String,
-      required: true,
       trim: true,
       maxlength: 120,
+      default: null,
+    },
+    // Distinguishes the full enrollment-interest form from the quick
+    // "Request a Callback" button — both write to this same collection so
+    // the admin has one place to see every inbound lead.
+    source: {
+      type: String,
+      enum: ["enroll_form", "callback_request"],
+      default: "enroll_form",
     },
     // Set once an admin has followed up on this lead — not exposed on the
     // public form; a future admin view can flip this via a separate route.
