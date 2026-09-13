@@ -2,7 +2,9 @@ const mongoose = require("mongoose");
 const ExamSubmission = require("../models/examSubmissionSchema");
 const User = require("../models/userModel");
 const Exam = require("../models/examModel");
+const Subject = require("../models/subjectModel");
 const markModel = require("../models/markModel");
+const attemptCounterModel = require("../models/attemptCounterModel");
 const {
   calculateTotalPossibleMarks,
 } = require("../utils/ExamSubmissionHelper");
@@ -14,10 +16,26 @@ const getAllExamsOverview = async (req, res) => {
     const limit = parseInt(req.query.limit) || 50;
     const skip = (page - 1) * limit;
 
-    // Single aggregation instead of N+1
+    // Admin's category-organized workflow: optionally scope this whole
+    // overview to one exam category (GATE / TNPSC AE / TNPSC JDO /
+    // SSC JE-RRB JE) instead of seeing every category mixed together.
+    const examMatch = {};
+    if (req.query.category) {
+      const subjectIdsInCategory = await Subject.find({
+        category: req.query.category,
+      }).distinct("_id");
+      examMatch.subject = { $in: subjectIdsInCategory };
+    }
+
+    // Single aggregation instead of N+1. Note: this intentionally shows
+    // exams of every status (not just "active") — an admin managing exams
+    // (publish/unpublish, item D "exam status") needs to see inactive ones
+    // too, with their status displayed, rather than have them silently
+    // disappear from the dashboard.
     const [examsData, totalCount] = await Promise.all([
       Exam.aggregate([
-        { $match: { status: "active" } },
+        { $match: examMatch },
+        { $sort: { createdAt: -1 } },
         { $skip: skip },
         { $limit: limit },
         {
@@ -42,11 +60,29 @@ const getAllExamsOverview = async (req, res) => {
             _id: 1,
             examCode: 1,
             order: 1,
+            status: 1,
             subTopic: 1,
             "subjectData._id": 1,
             "subjectData.name": 1,
+            "subjectData.category": 1,
             "subjectData.subtopics": 1,
             totalSubmissions: { $size: "$submissions" },
+            completedSubmissions: {
+              $filter: {
+                input: "$submissions",
+                as: "sub",
+                cond: { $eq: ["$$sub.status", "completed"] },
+              },
+            },
+            inProgressCount: {
+              $size: {
+                $filter: {
+                  input: "$submissions",
+                  as: "sub",
+                  cond: { $ne: ["$$sub.status", "completed"] },
+                },
+              },
+            },
             passedStudents: {
               $size: {
                 $filter: {
@@ -56,9 +92,18 @@ const getAllExamsOverview = async (req, res) => {
                 },
               },
             },
+          },
+        },
+        {
+          $addFields: {
+            completedCount: { $size: "$completedSubmissions" },
+            // Marks stats are computed from COMPLETED submissions only —
+            // an in-progress submission's obtainedMark is always still 0,
+            // and including it would silently drag avgScore/lowestMark
+            // down for no real reason.
             marks: {
               $map: {
-                input: "$submissions",
+                input: "$completedSubmissions",
                 as: "sub",
                 in: { $ifNull: ["$$sub.obtainedMark", 0] },
               },
@@ -67,19 +112,23 @@ const getAllExamsOverview = async (req, res) => {
         },
         {
           $addFields: {
+            qualifiedCount: "$passedStudents",
+            notQualifiedCount: {
+              $subtract: ["$completedCount", "$passedStudents"],
+            },
             avgScore: {
               $cond: {
-                if: { $gt: ["$totalSubmissions", 0] },
+                if: { $gt: ["$completedCount", 0] },
                 then: { $avg: "$marks" },
                 else: 0,
               },
             },
             passRate: {
               $cond: {
-                if: { $gt: ["$totalSubmissions", 0] },
+                if: { $gt: ["$completedCount", 0] },
                 then: {
                   $multiply: [
-                    { $divide: ["$passedStudents", "$totalSubmissions"] },
+                    { $divide: ["$passedStudents", "$completedCount"] },
                     100,
                   ],
                 },
@@ -88,14 +137,14 @@ const getAllExamsOverview = async (req, res) => {
             },
             highestMark: {
               $cond: {
-                if: { $gt: ["$totalSubmissions", 0] },
+                if: { $gt: ["$completedCount", 0] },
                 then: { $max: "$marks" },
                 else: 0,
               },
             },
             lowestMark: {
               $cond: {
-                if: { $gt: ["$totalSubmissions", 0] },
+                if: { $gt: ["$completedCount", 0] },
                 then: { $min: "$marks" },
                 else: 0,
               },
@@ -106,9 +155,11 @@ const getAllExamsOverview = async (req, res) => {
           $project: {
             _id: 1,
             examCode: 1,
+            status: 1,
             subject: {
               _id: "$subjectData._id",
               name: "$subjectData.name",
+              category: "$subjectData.category",
             },
             subTopic: {
               $let: {
@@ -134,6 +185,10 @@ const getAllExamsOverview = async (req, res) => {
             },
             order: 1,
             totalSubmissions: 1,
+            completedCount: 1,
+            inProgressCount: 1,
+            qualifiedCount: 1,
+            notQualifiedCount: 1,
             avgScore: { $round: ["$avgScore", 2] },
             passRate: { $round: ["$passRate", 2] },
             highestMark: 1,
@@ -141,7 +196,7 @@ const getAllExamsOverview = async (req, res) => {
           },
         },
       ]),
-      Exam.countDocuments({ status: "active" }),
+      Exam.countDocuments(examMatch),
     ]);
 
     // Calculate overall statistics
@@ -317,6 +372,67 @@ const getExamDetailedAnalysis = async (req, res) => {
       }));
 
     /* =======================
+       C2. FULL PER-STUDENT PERFORMANCE (Exam → Students → Individual
+       Performance drill-down). Unlike topPerformers above (top 5 only,
+       kept for the summary card), this lists EVERY submission — completed
+       or still in progress — with rank-by-marks and rank-by-completion-time
+       computed only among completed submissions (an in-progress row's
+       marks/time aren't final yet, so ranking it would be misleading),
+       plus each student's attempt allowance so the admin can see who might
+       need — or who was already granted — an extra attempt.
+    ======================= */
+    const completedForRanking = submissions.filter(
+      (s) => s.status === "completed",
+    );
+    const marksRankOrder = [...completedForRanking].sort(
+      (a, b) => b.obtainedMark - a.obtainedMark,
+    );
+    const timeRankOrder = [...completedForRanking].sort(
+      (a, b) => (a.timetaken || 0) - (b.timetaken || 0),
+    );
+    const marksRankMap = new Map(
+      marksRankOrder.map((s, idx) => [s._id.toString(), idx + 1]),
+    );
+    const timeRankMap = new Map(
+      timeRankOrder.map((s, idx) => [s._id.toString(), idx + 1]),
+    );
+
+    const involvedUserIds = [
+      ...new Set(submissions.map((s) => s.userId?._id?.toString()).filter(Boolean)),
+    ];
+    const attemptCounters = await attemptCounterModel
+      .find({ examId, userId: { $in: involvedUserIds } })
+      .lean();
+    const attemptCounterMap = new Map(
+      attemptCounters.map((c) => [c.userId.toString(), c]),
+    );
+
+    const studentPerformance = submissions
+      .map((sub) => {
+        const idStr = sub._id.toString();
+        const userIdStr = sub.userId?._id?.toString();
+        const counter = userIdStr ? attemptCounterMap.get(userIdStr) : null;
+        return {
+          submissionId: sub._id,
+          userId: sub.userId?._id,
+          name: sub.userId?.username || "Unknown",
+          email: sub.userId?.email || "N/A",
+          status: sub.status,
+          pass: sub.pass,
+          marks: sub.obtainedMark || 0,
+          totalPossibleMarks,
+          timetaken: sub.timetaken || 0,
+          attemptNumber: sub.attemptNumber,
+          maxAllowedAttempts: counter?.maxAllowedAttempts ?? 1,
+          rankByMarks: marksRankMap.get(idStr) || null,
+          rankByCompletionTime: timeRankMap.get(idStr) || null,
+          submittedAt: sub.updatedAt,
+          startedAt: sub.createdAt,
+        };
+      })
+      .sort((a, b) => (a.rankByMarks || Infinity) - (b.rankByMarks || Infinity));
+
+    /* =======================
        D. SUBTOPIC-WISE ANALYSIS
     ======================= */
     const subTopicAnalysis = {};
@@ -423,6 +539,7 @@ const getExamDetailedAnalysis = async (req, res) => {
         },
         performanceDistribution,
         topPerformers,
+        studentPerformance,
         subTopicAnalysis: subTopicData,
         mostMistakenTopic: worstSubTopic,
         keyInsights,
@@ -451,15 +568,23 @@ const getAllStudentsOverview = async (req, res) => {
       throw new Error("Mark configuration not found");
     }
 
+    // Admin's category-organized workflow: optionally scope this student
+    // list to one exam category (GATE / TNPSC AE / TNPSC JDO / SSC JE-RRB
+    // JE) instead of seeing every category's students mixed together.
+    const studentMatch = { role: "student" };
+    if (req.query.category) {
+      studentMatch.category = req.query.category;
+    }
+
     // Get all students with their submissions
     const [allStudents, totalCount] = await Promise.all([
-      User.find({ role: "student" })
+      User.find(studentMatch)
         .sort({ username: 1 })
         .skip(skip)
         .limit(limit)
-        .select("_id username email registerNumber")
+        .select("_id username email registerNumber category isDisabled")
         .lean(),
-      User.countDocuments({ role: "student" }),
+      User.countDocuments(studentMatch),
     ]);
 
     // Process each student
@@ -508,6 +633,8 @@ const getAllStudentsOverview = async (req, res) => {
           name: student.username,
           email: student.email,
           registerNumber: student.registerNumber,
+          category: student.category || null,
+          isDisabled: !!student.isDisabled,
           totalExams,
           avgPercentage: parseFloat(avgPercentage.toFixed(2)),
           passRate: parseFloat(passRate.toFixed(2)),
@@ -680,7 +807,58 @@ const getStudentDetailedAnalysis = async (req, res) => {
       });
     });
 
-    // C. Exam-wise Summary (NEW)
+    // C. Exam-wise Summary (NEW) — rank this student, per exam, against
+    // every OTHER student who completed that same exam (rank-by-marks and
+    // rank-by-completion-time), plus this student's own attempt status and
+    // allowance for that exam (item C's "Student → Exams → Individual
+    // Performance" requirement).
+    const completedExamIds = [
+      ...new Set(
+        submissions
+          .filter((sub) => sub.status === "completed" && sub.examId?._id)
+          .map((sub) => sub.examId._id.toString()),
+      ),
+    ];
+
+    const [allSubmissionsForTheseExams, studentAttemptCounters] =
+      await Promise.all([
+        ExamSubmission.find({
+          examId: { $in: completedExamIds },
+          status: "completed",
+        })
+          .select("examId userId obtainedMark timetaken")
+          .lean(),
+        attemptCounterModel
+          .find({ userId: studentId, examId: { $in: completedExamIds } })
+          .lean(),
+      ]);
+
+    const rankMapsByExam = new Map(); // examId -> { marksRank: Map<submissionUserId,rank>, timeRank: Map }
+    completedExamIds.forEach((examIdStr) => {
+      const subsForExam = allSubmissionsForTheseExams.filter(
+        (s) => s.examId.toString() === examIdStr,
+      );
+      const byMarks = [...subsForExam].sort(
+        (a, b) => b.obtainedMark - a.obtainedMark,
+      );
+      const byTime = [...subsForExam].sort(
+        (a, b) => (a.timetaken || 0) - (b.timetaken || 0),
+      );
+      rankMapsByExam.set(examIdStr, {
+        marksRank: new Map(
+          byMarks.map((s, idx) => [s.userId.toString(), idx + 1]),
+        ),
+        timeRank: new Map(
+          byTime.map((s, idx) => [s.userId.toString(), idx + 1]),
+        ),
+        totalParticipants: subsForExam.length,
+      });
+    });
+
+    const attemptCounterByExam = new Map(
+      studentAttemptCounters.map((c) => [c.examId.toString(), c]),
+    );
+
     const examSummary = submissions
       .filter((sub) => sub.status === "completed" && sub.examData.length > 0)
       .map((sub) => {
@@ -715,6 +893,10 @@ const getStudentDetailedAnalysis = async (req, res) => {
             ? Number(((sub.obtainedMark / totalMarks) * 100).toFixed(2))
             : 0;
 
+        const examIdStr = sub.examId?._id?.toString();
+        const rankInfo = examIdStr ? rankMapsByExam.get(examIdStr) : null;
+        const counter = examIdStr ? attemptCounterByExam.get(examIdStr) : null;
+
         return {
           examId: sub.examId?._id,
           subject: sub.examId?.subject?.name || "N/A",
@@ -726,6 +908,18 @@ const getStudentDetailedAnalysis = async (req, res) => {
           partial,
           skipped,
           percentage,
+          marks: sub.obtainedMark || 0,
+          totalPossibleMarks: totalMarks,
+          completionTimeSeconds: sub.timetaken || 0,
+          rankByMarks: rankInfo?.marksRank.get(studentId.toString()) || null,
+          rankByCompletionTime:
+            rankInfo?.timeRank.get(studentId.toString()) || null,
+          totalParticipants: rankInfo?.totalParticipants || 0,
+          attemptNumber: sub.attemptNumber,
+          status: sub.status,
+          pass: sub.pass,
+          submittedAt: sub.updatedAt,
+          maxAllowedAttempts: counter?.maxAllowedAttempts ?? 1,
         };
       });
 

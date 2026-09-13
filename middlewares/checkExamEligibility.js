@@ -10,7 +10,7 @@ const checkExamEligibility = async (req, res, next) => {
       .findOne({ examCode })
       .populate({
         path: "subject",
-        select: "name subtopics",
+        select: "name category subtopics",
       })
       .populate({
         path: "questions",
@@ -22,6 +22,21 @@ const checkExamEligibility = async (req, res, next) => {
       return res.status(404).json({
         success: false,
         message: "Exam not found",
+      });
+    }
+
+    // Defense-in-depth category check: getEligibleExamForUser already only
+    // ever hands a student exam codes within their own category, but this
+    // endpoint can in principle be called directly with any examCode, so
+    // the isolation guarantee has to be enforced here too, not just in the
+    // listing endpoint.
+    if (
+      req.user.role === "student" &&
+      exam.subject?.category !== req.user.category
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "You are not eligible to attend this exam.",
       });
     }
 

@@ -41,7 +41,24 @@ const getEligibleExamForUser = async (req, res) => {
       passedOrdersByKey.get(key).add(p.order);
     }
 
-    const allSubjects = await Subject.find().select("_id name subtopics");
+    // A student only ever sees exams within their own exam category — this
+    // is the main chokepoint that keeps (say) a TNPSC AE student from ever
+    // seeing GATE exams, since this endpoint is what the student dashboard
+    // uses to list "Available" exams in the first place. An admin viewing
+    // this (e.g. via the "attend as any user" path) is not restricted.
+    const subjectFilter = {};
+    if (req.user.role === "student") {
+      if (!req.user.category) {
+        // A student with no category assigned yet has nothing to see —
+        // fail closed, not open.
+        return res.status(200).json([]);
+      }
+      subjectFilter.category = req.user.category;
+    }
+
+    const allSubjects = await Subject.find(subjectFilter).select(
+      "_id name subtopics"
+    );
 
     const flattenedExams = [];
 

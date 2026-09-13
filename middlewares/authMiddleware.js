@@ -21,6 +21,16 @@ const verifyToken = async (req, res, next) => {
       return res.status(401).json({ error: "Session expired or invalid" });
     }
 
+    // A disabled account is rejected immediately, even with a still-valid
+    // session token — the admin's "disable student" control (Controllers /
+    // Control Panel) needs to take effect right away, not just block future
+    // logins.
+    if (user.isDisabled) {
+      return res.status(403).json({
+        error: "This account has been disabled. Please contact the academy.",
+      });
+    }
+
     req.user = user;
     next();
   } catch (error) {

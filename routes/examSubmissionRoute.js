@@ -6,6 +6,7 @@ const {
   getExamSubmissionById,
   getAllPassedSubmission,
   getAllPreviousAttempt,
+  getExamStatusOverviewForUser,
   submitReviewForExamSubmission,
   deleteCommentInExamSubmission,
   updateCommentInExamSubmission,
@@ -39,6 +40,12 @@ router.get(
   verifyToken,
   authorizeRoles("admin", "evaluator", "student"),
   getPreviousAttemptForUser
+);
+router.get(
+  "/status-overview/:userId",
+  verifyToken,
+  authorizeRoles("admin", "evaluator", "student"),
+  getExamStatusOverviewForUser
 );
 router.get(
   "/get/:examSubmissionId",

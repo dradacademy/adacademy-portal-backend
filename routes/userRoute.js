@@ -10,6 +10,7 @@ const {
   getUserData,
   bulkCreateUsers,
   downloadUserTemplate,
+  toggleUserActive,
 } = require("../controllers/userController");
 const upload = require("../utils/multerConfig");
 const {
@@ -72,6 +73,12 @@ router.post(
   verifyToken,
   authorizeRoles("admin", "student", "evaluator"),
   logoutUser
+);
+router.patch(
+  "/:userId/toggle-active",
+  verifyToken,
+  authorizeRoles("admin"),
+  toggleUserActive
 );
 
 module.exports = router;

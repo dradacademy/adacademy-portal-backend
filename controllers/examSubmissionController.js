@@ -3,6 +3,7 @@ const examModel = require("../models/examModel");
 const examSubmissionSchema = require("../models/examSubmissionSchema");
 const userModel = require("../models/userModel");
 const examPassModel = require("../models/examPassModel");
+const attemptCounterModel = require("../models/attemptCounterModel");
 const sendMail = require("../utils/sendMail");
 const markModel = require("../models/markModel");
 const { ensureMarkConfigExists } = require("./markController");
@@ -253,6 +254,106 @@ const getPreviousAttemptForUser = async (req, res) => {
 
     res.status(200).json(previousAttemptData);
   } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Unable to get the data",
+      error: error.message,
+    });
+  }
+};
+
+// Student Dashboard — the "Attended / Qualified / Not Qualified" three of
+// the four status buckets (the fourth, "Available", already comes from
+// examFunctionController.js's getEligibleExamForUser). Deliberately
+// filters on status:"completed" (unlike the older getPassedSubmissionForUser
+// / getPreviousAttemptForUser, which filter on `pass` alone and so used to
+// also pick up in-progress "started" submissions, since `pass` defaults to
+// false on those too) — an exam only ever appears here once it has an
+// actual pass/fail result, and "attended" is simply the union of
+// "qualified" and "not qualified" per the spec: the moment a student
+// completes an exam it leaves Available and lands directly in one of
+// these two, and both together are "Attended".
+const getExamStatusOverviewForUser = async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        message: "User ID is required",
+      });
+    }
+
+    if (req.user.role === "student" && req.user._id.toString() !== userId) {
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden: You do not have the required permissions",
+      });
+    }
+
+    const submissions = await examSubmissionSchema
+      .find({ userId, status: "completed" })
+      .populate({
+        path: "examId",
+        select: "subject subTopic order examCode passPercentage questions",
+        populate: [
+          { path: "subject", select: "name category" },
+          {
+            path: "questions",
+            select: "level marks negativeMark",
+          },
+        ],
+      })
+      .sort({ updatedAt: -1 })
+      .lean();
+
+    // Resolve subtopic names + attempt-permission info (does this student
+    // have a second/third attempt granted on this exam?) per submission.
+    const examIds = [
+      ...new Set(
+        submissions
+          .filter((s) => s.examId)
+          .map((s) => s.examId._id.toString())
+      ),
+    ];
+    const counters = await attemptCounterModel
+      .find({ userId, examId: { $in: examIds } })
+      .lean();
+    const counterByExamId = new Map(
+      counters.map((c) => [c.examId.toString(), c])
+    );
+
+    for (const submission of submissions) {
+      if (submission.examId && submission.examId.subject) {
+        const subject = await mongoose
+          .model("Subject")
+          .findById(submission.examId.subject._id)
+          .select("subtopics")
+          .lean();
+        const subtopic = subject?.subtopics?.find(
+          (st) => st._id.toString() === submission.examId.subTopic?.toString()
+        );
+        submission.examId.subTopicName = subtopic ? subtopic.name : null;
+      }
+
+      const counter = submission.examId
+        ? counterByExamId.get(submission.examId._id.toString())
+        : null;
+      submission.maxAllowedAttempts = counter?.maxAllowedAttempts ?? 1;
+    }
+
+    const qualified = submissions.filter((s) => s.pass === true);
+    const notQualified = submissions.filter((s) => s.pass !== true);
+
+    res.status(200).json({
+      success: true,
+      data: {
+        attended: submissions,
+        qualified,
+        notQualified,
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching exam status overview:", error);
     res.status(500).json({
       success: false,
       message: "Unable to get the data",
@@ -845,6 +946,7 @@ module.exports = {
   getPassedSubmissionForUser,
   getAllPreviousAttempt,
   getPreviousAttemptForUser,
+  getExamStatusOverviewForUser,
   getExamSubmissionById,
   submitExam,
   submitReviewForExamSubmission,

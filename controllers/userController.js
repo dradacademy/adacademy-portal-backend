@@ -3,15 +3,27 @@ const jwt = require("jsonwebtoken");
 const XLSX = require("xlsx");
 const { Readable } = require("stream");
 const userModel = require("../models/userModel");
+const { EXAM_CATEGORIES } = require("../constants/examCategories");
 
 const registerUser = async (req, res) => {
   try {
-    const { registerNumber, username, email, password, role } = req.body;
+    const { registerNumber, username, email, password, role, category } = req.body;
     if (!username || !email || !password || !role) {
       return res.status(400).json({ error: "All fields are required" });
     }
     if (role !== "student" && role !== "evaluator" && role !== "admin") {
       return res.status(400).json({ error: "Invalid role" });
+    }
+
+    // Every student belongs to exactly one exam category (GATE, TNPSC AE,
+    // TNPSC JDO, or SSC JE/RRB JE) — this is what keeps students in one
+    // category from ever seeing another category's subjects/exams. Admins
+    // and evaluators stay unscoped (category is ignored for them, even if
+    // sent).
+    if (role === "student" && !EXAM_CATEGORIES.includes(category)) {
+      return res.status(400).json({
+        error: `Please select a valid exam category for the student (one of: ${EXAM_CATEGORIES.join(", ")}).`,
+      });
     }
 
     // Task 5: Secure Admin Creation
@@ -70,6 +82,7 @@ const registerUser = async (req, res) => {
       email: email.toLowerCase(),
       password: hashedPassword,
       role,
+      category: role === "student" ? category : null,
     });
     res.status(201).json({ user });
   } catch (error) {
@@ -120,6 +133,12 @@ const loginUser = async (req, res) => {
     const user = await userModel.findOne({ email: email.toLowerCase() });
     if (!user) {
       return res.status(400).json({ error: "Invalid credentials" });
+    }
+
+    if (user.isDisabled) {
+      return res.status(403).json({
+        error: "This account has been disabled. Please contact the academy.",
+      });
     }
 
     if (user.role === "student") {
@@ -206,7 +225,8 @@ const bulkCreateUsers = async (req, res) => {
         username: user.username.trim(),
         email: user.email.toLowerCase().trim(),
         password: user.password.trim(),
-        role: user.role.toLowerCase().trim()
+        role: user.role.toLowerCase().trim(),
+        category: user.category ? String(user.category).toLowerCase().trim() : null,
       };
 
       // Email format validation
@@ -235,6 +255,15 @@ const bulkCreateUsers = async (req, res) => {
           row: rowNumber,
           email: sanitizedUser.email,
           reason: 'Register number is required for students'
+        });
+        continue;
+      }
+
+      if (sanitizedUser.role === 'student' && !EXAM_CATEGORIES.includes(sanitizedUser.category)) {
+        errors.push({
+          row: rowNumber,
+          email: sanitizedUser.email,
+          reason: `Category is required for students and must be one of: ${EXAM_CATEGORIES.join(", ")}`
         });
         continue;
       }
@@ -321,7 +350,8 @@ const bulkCreateUsers = async (req, res) => {
         username: user.username,
         email: user.email,
         password: await bcrypt.hash(user.password, 10),
-        role: user.role
+        role: user.role,
+        category: user.role === 'student' ? user.category : null,
       }))
     );
 
@@ -465,8 +495,15 @@ const logoutUser = async (req, res) => {
 
 const downloadUserTemplate = (req, res) => {
   const worksheetData = [
-    ["registerNumber", "username", "email", "password", "role"],
-    ["7719801424", "JohnDoe", "john@example.com", "123456", "student"],
+    ["registerNumber", "username", "email", "password", "role", "category"],
+    [
+      "7719801424",
+      "JohnDoe",
+      "john@example.com",
+      "123456",
+      "student",
+      "gate", // one of: gate, tnpsc-ae, tnpsc-jdo, ssc-rrb-je — required for students, leave blank for evaluator/admin rows
+    ],
   ];
 
   const ws = XLSX.utils.aoa_to_sheet(worksheetData);
@@ -489,6 +526,46 @@ const downloadUserTemplate = (req, res) => {
   stream.pipe(res);
 };
 
+// Controllers / Control Panel — "enable/disable student access". Admin-only.
+// Flips isDisabled; a disabled account is rejected immediately (see
+// authMiddleware.js's verifyToken) even on an already-issued session token,
+// and rejected again at their next login attempt with a clear message.
+const toggleUserActive = async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { isDisabled } = req.body;
+
+    if (typeof isDisabled !== "boolean") {
+      return res
+        .status(400)
+        .json({ success: false, message: "isDisabled (boolean) is required." });
+    }
+
+    if (req.user._id.toString() === userId && isDisabled) {
+      return res.status(400).json({
+        success: false,
+        message: "You cannot disable your own admin account.",
+      });
+    }
+
+    const user = await userModel
+      .findByIdAndUpdate(userId, { isDisabled }, { new: true })
+      .select("-password");
+
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: isDisabled ? "Account disabled." : "Account re-enabled.",
+      user,
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 module.exports = {
   registerUser,
   loginUser,
@@ -499,4 +576,5 @@ module.exports = {
   logoutUser,
   getUserData,
   downloadUserTemplate,
+  toggleUserActive,
 };

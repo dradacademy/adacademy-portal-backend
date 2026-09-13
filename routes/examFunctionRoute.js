@@ -77,6 +77,32 @@ router.post(
         });
       }
 
+      // Attempt restriction: a student may normally attempt each exam only
+      // once. This checks the number of already-COMPLETED submissions
+      // (started-but-abandoned sessions don't count) against
+      // maxAllowedAttempts, which defaults to 1 and can only be raised by
+      // an admin (Controllers/Control Panel "grant second attempt") via
+      // the /grant-extra-attempt route below — never by the student.
+      if (req.user.role === "student") {
+        const [existingCounter, completedCount] = await Promise.all([
+          attemptCounterModel.findOne({ userId, examId }),
+          examSubmissionSchema.countDocuments({
+            userId,
+            examId,
+            status: "completed",
+          }),
+        ]);
+        const maxAllowedAttempts = existingCounter?.maxAllowedAttempts ?? 1;
+
+        if (completedCount >= maxAllowedAttempts) {
+          return res.status(403).json({
+            success: false,
+            message:
+              "You have already attempted this exam. Contact the academy if you need another attempt.",
+          });
+        }
+      }
+
       // No active submission - create new one with atomic attempt counter
       // Use findOneAndUpdate with $inc for atomic counter increment
       const counter = await attemptCounterModel.findOneAndUpdate(
@@ -136,6 +162,62 @@ router.post(
       res.status(500).json({
         success: false,
         message: "Error starting exam",
+        error: error.message,
+      });
+    }
+  }
+);
+
+// Controllers / Control Panel — "first-attempt/second-attempt permission".
+// Admin-only override that raises (or resets) how many attempts a specific
+// student gets on a specific exam. This is the ONLY way a student can ever
+// get more than the default single attempt — never available to students
+// themselves.
+router.patch(
+  "/grant-extra-attempt",
+  verifyToken,
+  authorizeRoles("admin"),
+  async (req, res) => {
+    try {
+      const { userId, examId, maxAllowedAttempts } = req.body;
+
+      if (!userId || !examId) {
+        return res.status(400).json({
+          success: false,
+          message: "userId and examId are required.",
+        });
+      }
+
+      const parsedMax = Number(maxAllowedAttempts);
+      if (!Number.isInteger(parsedMax) || parsedMax < 1) {
+        return res.status(400).json({
+          success: false,
+          message: "maxAllowedAttempts must be a whole number of at least 1.",
+        });
+      }
+
+      const counter = await attemptCounterModel.findOneAndUpdate(
+        { userId, examId },
+        {
+          $setOnInsert: { currentAttempt: 0 },
+          $set: {
+            maxAllowedAttempts: parsedMax,
+            grantedBy: req.user._id,
+            grantedAt: new Date(),
+          },
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+      );
+
+      res.status(200).json({
+        success: true,
+        message: `This student may now attempt this exam up to ${parsedMax} time(s).`,
+        counter,
+      });
+    } catch (error) {
+      res.status(500).json({
+        success: false,
+        message: "Failed to update attempt permission",
         error: error.message,
       });
     }
