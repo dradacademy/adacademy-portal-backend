@@ -90,6 +90,13 @@ app.set("trust proxy", 1);
     require("./routes/enrollmentLeadRoute"),
   );
   app.use("/api/content", require("./routes/contentRoute"));
+  // Public /careers application form — no login required, same spam-limit
+  // reasoning as the enrollment-leads form above.
+  app.use(
+    "/api/career-applications",
+    leadLimiter,
+    require("./routes/careerApplicationRoute"),
+  );
 
   // Plain server-side redirects (not under /api — these are meant to be
   // full-page browser navigations from a link/button click, not AJAX calls).
