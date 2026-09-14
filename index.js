@@ -43,7 +43,19 @@ app.set("trust proxy", 1);
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));
 
-  const allowedOrigins = [process.env.CLIENT_URL];
+  // CLIENT_URL is the one canonical frontend URL (also used to build the
+  // /portal/* login-redirect fallback below, so it must stay a single URL).
+  // EXTRA_CLIENT_ORIGINS is optional and comma-separated — use it to allow
+  // additional origins (e.g. the bare vercel.app URL, or a www vs. apex
+  // domain) through CORS without needing another code change/deploy every
+  // time a domain is added or changed.
+  const extraOrigins = (process.env.EXTRA_CLIENT_ORIGINS || "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+  const allowedOrigins = [process.env.CLIENT_URL, ...extraOrigins].filter(
+    Boolean,
+  );
 
   app.use(
     cors({
@@ -72,6 +84,7 @@ app.set("trust proxy", 1);
   app.use("/api/dashboard", require("./routes/dashboardRoute"));
   app.use("/api/question-import", require("./routes/questionImportRoute"));
   app.use("/api/test-tracking", require("./routes/testTrackingRoute"));
+  app.use("/api/content", require("./routes/contentRoute"));
   app.use(
     "/api/enrollment-leads",
     leadLimiter,
