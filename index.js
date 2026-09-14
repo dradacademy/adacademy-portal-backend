@@ -84,12 +84,12 @@ app.set("trust proxy", 1);
   app.use("/api/dashboard", require("./routes/dashboardRoute"));
   app.use("/api/question-import", require("./routes/questionImportRoute"));
   app.use("/api/test-tracking", require("./routes/testTrackingRoute"));
-  app.use("/api/content", require("./routes/contentRoute"));
   app.use(
     "/api/enrollment-leads",
     leadLimiter,
     require("./routes/enrollmentLeadRoute"),
   );
+  app.use("/api/content", require("./routes/contentRoute"));
 
   // Plain server-side redirects (not under /api — these are meant to be
   // full-page browser navigations from a link/button click, not AJAX calls).
