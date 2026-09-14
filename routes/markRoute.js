@@ -9,12 +9,8 @@ const {
 } = require("../middlewares/authMiddleware");
 const router = express.Router();
 
-router.get(
-  "/get",
-  verifyToken,
-  authorizeRoles("admin", "evaluator", "student"),
-  getMarkData
-);
+// Public — same reasoning as durationRoute.js's /get.
+router.get("/get", getMarkData);
 router.put("/update", verifyToken, authorizeRoles("admin"), updateMarkData);
 
 module.exports = router;

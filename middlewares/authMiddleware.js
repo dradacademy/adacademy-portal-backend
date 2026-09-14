@@ -52,7 +52,35 @@ const authorizeRoles = (...allowedRoles) => {
   };
 };
 
+// Same token check as verifyToken, but never rejects the request — used on
+// routes the public homepage calls before any login (subjects/duration/mark
+// "get" endpoints). A missing, expired, or otherwise invalid token just
+// leaves req.user unset instead of returning 401; the controller then
+// treats that the same as an anonymous visitor.
+const optionalAuth = async (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization;
+
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return next();
+    }
+
+    const token = authHeader.substring(7);
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await userModel.findById(decoded.userId);
+
+    if (user && user.sessionToken === token && !user.isDisabled) {
+      req.user = user;
+    }
+
+    next();
+  } catch (error) {
+    next();
+  }
+};
+
 module.exports = {
   verifyToken,
   authorizeRoles,
+  optionalAuth,
 };

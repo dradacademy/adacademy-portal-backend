@@ -9,14 +9,14 @@ const {
 const {
   verifyToken,
   authorizeRoles,
+  optionalAuth,
 } = require("../middlewares/authMiddleware");
 
-router.get(
-  "/get",
-  verifyToken,
-  authorizeRoles("admin", "evaluator", "student"),
-  getSubjects
-);
+// Public — the homepage's course/subject listing loads for every visitor,
+// logged in or not. optionalAuth still identifies a logged-in student (so
+// their category-filtered view keeps working); getSubjects handles
+// req.user being unset for anonymous visitors.
+router.get("/get", optionalAuth, getSubjects);
 router.post("/create", verifyToken, authorizeRoles("admin"), createSubject);
 router.put("/update/:id", verifyToken, authorizeRoles("admin"), editSubjects);
 router.delete(

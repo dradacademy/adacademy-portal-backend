@@ -38,7 +38,10 @@ const getSubjects = async (req, res) => {
     // getEligibleExamForUser, so a TNPSC student's Subjects dropdown (in
     // any admin-facing view they can somehow reach) or any other list of
     // subjects never includes GATE (or any other category's) subjects.
-    if (req.user.role === "student") {
+    // An anonymous visitor (the public homepage, not logged in) has no
+    // req.user at all — treat that the same as the admin's view below
+    // (all subjects, or filtered by an explicit ?category= query).
+    if (req.user?.role === "student") {
       if (!req.user.category) {
         return res.status(200).json([]);
       }
