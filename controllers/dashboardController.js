@@ -5,6 +5,8 @@ const Exam = require("../models/examModel");
 const Subject = require("../models/subjectModel");
 const markModel = require("../models/markModel");
 const attemptCounterModel = require("../models/attemptCounterModel");
+const examPassModel = require("../models/examPassModel");
+const videoProgressModel = require("../models/videoProgressModel");
 const {
   calculateTotalPossibleMarks,
 } = require("../utils/ExamSubmissionHelper");
@@ -673,7 +675,7 @@ const getStudentDetailedAnalysis = async (req, res) => {
     const { studentId } = req.params;
 
     const student = await User.findById(studentId)
-      .select("username email registerNumber role")
+      .select("username email registerNumber role category lastLoginAt")
       .lean();
 
     if (!student || student.role !== "student") {
@@ -705,6 +707,10 @@ const getStudentDetailedAnalysis = async (req, res) => {
       email: student.email,
       registerNumber: student.registerNumber,
       course: "Not specified", // Add course field to User model if needed
+      // Activity signal outside of test performance — when this student
+      // last logged in (set on every successful login; see loginUser in
+      // userController.js).
+      lastLoginAt: student.lastLoginAt || null,
     };
 
     // Fetch mark configuration for percentage calculation
@@ -736,23 +742,41 @@ const getStudentDetailedAnalysis = async (req, res) => {
           ) / totalPercentageArray.length
         : 0;
 
-    // Calculate rank (you may want to implement a more sophisticated ranking system)
-    const allStudents = await User.find({ role: "student" })
-      .select("_id")
-      .lean();
-    const allStudentScores = await Promise.all(
-      allStudents.map(async (s) => {
-        const subs = await ExamSubmission.find({ userId: s._id }).lean();
-        const total = subs.reduce((sum, sub) => sum + sub.obtainedMark, 0);
-        const avg = subs.length > 0 ? total / subs.length : 0;
-        return { studentId: s._id.toString(), avgScore: avg };
-      }),
-    );
+    // Calculate rank across every student. Previously this re-fetched each
+    // candidate student's ENTIRE submission history in a separate query
+    // (one ExamSubmission.find per student — an O(N) query fan-out that
+    // gets slower as the student count grows). Replaced with a single
+    // aggregation pipeline: average obtainedMark per userId in one pass,
+    // left-joined against every student so a student with zero submissions
+    // still ranks (avgScore 0) instead of being silently dropped.
+    const totalStudentsCount = await User.countDocuments({ role: "student" });
 
-    const sortedStudents = allStudentScores.sort(
-      (a, b) => b.avgScore - a.avgScore,
-    );
-    const rank = sortedStudents.findIndex((s) => s.studentId === studentId) + 1;
+    const rankAgg = await User.aggregate([
+      { $match: { role: "student" } },
+      { $project: { _id: 1 } },
+      {
+        $lookup: {
+          from: ExamSubmission.collection.name,
+          let: { studentId: "$_id" },
+          pipeline: [
+            { $match: { $expr: { $eq: ["$userId", "$$studentId"] } } },
+            { $group: { _id: null, avgScore: { $avg: "$obtainedMark" } } },
+          ],
+          as: "scoreInfo",
+        },
+      },
+      {
+        $project: {
+          avgScore: {
+            $ifNull: [{ $arrayElemAt: ["$scoreInfo.avgScore", 0] }, 0],
+          },
+        },
+      },
+      { $sort: { avgScore: -1 } },
+    ]);
+
+    const rank =
+      rankAgg.findIndex((s) => s._id.toString() === studentId) + 1;
 
     // Calculate accuracy
     let totalCorrect = 0;
@@ -772,7 +796,7 @@ const getStudentDetailedAnalysis = async (req, res) => {
     const overallPerformance = {
       percentage: parseFloat(avgPercentage.toFixed(2)),
       rank,
-      totalStudents: allStudents.length,
+      totalStudents: totalStudentsCount,
       correctAnswers: totalCorrect,
       attemptedQuestions: totalAttempted,
     };
@@ -919,7 +943,12 @@ const getStudentDetailedAnalysis = async (req, res) => {
           status: sub.status,
           pass: sub.pass,
           submittedAt: sub.updatedAt,
-          maxAllowedAttempts: counter?.maxAllowedAttempts ?? 1,
+          maxAllowedAttempts: counter?.maxAllowedAttempts ?? 3,
+          // Speed %/Accuracy % for THIS specific attempt (each submission
+          // document is one independent attempt, so examSummary already
+          // has one entry per attempt, not collapsed to the latest).
+          speedPercent: sub.speedPercent ?? null,
+          accuracyPercent: sub.accuracyPercent ?? null,
         };
       });
 
@@ -1129,6 +1158,69 @@ const getStudentDetailedAnalysis = async (req, res) => {
       },
     };
 
+    // F. Pending tests count — exams eligible/unlocked for this student's
+    // category+progression that have no completed submission yet. Reuses
+    // the same order-based eligibility rule as getEligibleExamForUser /
+    // getStudentTestIndex (order 1 is always open; a later order unlocks
+    // once the previous order in the same subject+subtopic is passed).
+    let pendingTestsCount = 0;
+    if (student.category) {
+      const [studentSubjects, studentPasses] = await Promise.all([
+        Subject.find({ category: student.category }).select("_id subtopics"),
+        examPassModel.find({ userId: studentId, pass: true }).select("subject subTopic order"),
+      ]);
+      const studentSubjectIds = studentSubjects.map((s) => s._id);
+
+      const studentPassedOrders = new Map();
+      for (const p of studentPasses) {
+        const key = `${p.subject}-${p.subTopic}`;
+        if (!studentPassedOrders.has(key)) studentPassedOrders.set(key, new Set());
+        studentPassedOrders.get(key).add(p.order);
+      }
+
+      const activeExams = await Exam.find({
+        subject: { $in: studentSubjectIds },
+        status: "active",
+      }).select("_id subject subTopic order");
+
+      const completedExamIdSet = new Set(completedExamIds);
+
+      pendingTestsCount = activeExams.filter((exam) => {
+        const key = `${exam.subject}-${exam.subTopic}`;
+        const passedOrders = studentPassedOrders.get(key) || new Set();
+        const isEligible = exam.order === 1 || passedOrders.has(exam.order - 1);
+        return isEligible && !completedExamIdSet.has(exam._id.toString());
+      }).length;
+    }
+
+    // G. Video engagement — every recorded class this student has ANY
+    // watch progress on, matching the admin's "Class 1: 95%, Class 2: 72%"
+    // example. Empty until the student has watched anything (a brand new
+    // recorded-class library, or a student who hasn't opened one yet).
+    const videoProgressRows = await videoProgressModel
+      .find({ userId: studentId })
+      .populate("videoId", "title durationSeconds")
+      .sort({ lastWatchedAt: -1 });
+
+    const videoEngagement = videoProgressRows
+      .filter((row) => row.videoId)
+      .map((row) => {
+        const durationSeconds = row.videoId.durationSeconds || 0;
+        const percentWatched = durationSeconds
+          ? Math.min(100, (row.totalWatchSeconds / durationSeconds) * 100)
+          : 0;
+
+        return {
+          videoId: row.videoId._id,
+          title: row.videoId.title,
+          totalWatchSeconds: row.totalWatchSeconds,
+          percentWatched: Number(percentWatched.toFixed(1)),
+          sessionCount: row.sessionCount,
+          lastWatchedAt: row.lastWatchedAt,
+          lastPositionSeconds: row.lastPositionSeconds,
+        };
+      });
+
     res.status(200).json({
       success: true,
       data: {
@@ -1139,6 +1231,8 @@ const getStudentDetailedAnalysis = async (req, res) => {
         topicChartData,
         attemptSummary,
         keyInsights,
+        pendingTestsCount,
+        videoEngagement,
       },
     });
   } catch (error) {

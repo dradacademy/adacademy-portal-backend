@@ -40,11 +40,37 @@ const isOnTime = (completedAt, scheduledDate) => {
   return new Date(completedAt) <= endOfScheduledDay;
 };
 
+// Build a single attempt entry (one completed submission) with derived
+// percentage/on-time fields, plus the new Speed %/Accuracy % metrics.
+const buildAttemptRecord = ({ submission, totalPossibleMarks, scheduledDate }) => {
+  const percentage = totalPossibleMarks
+    ? Math.round((submission.obtainedMark / totalPossibleMarks) * 1000) / 10
+    : 0;
+
+  return {
+    attemptNumber: submission.attemptNumber,
+    completedAt: submission.completedAt || submission.updatedAt,
+    obtainedMark: submission.obtainedMark,
+    percentage,
+    pass: submission.pass,
+    onTime: isOnTime(submission.completedAt || submission.updatedAt, scheduledDate),
+    speedPercent: submission.speedPercent ?? null,
+    accuracyPercent: submission.accuracyPercent ?? null,
+  };
+};
+
+// Build the per-exam row. `submissions` is EVERY completed submission for
+// this exam (this student, or this exam+student pair on the admin side),
+// not just the latest — each becomes its own entry in `attempts`, sorted by
+// attemptNumber ascending. The top-level fields (status/completedAt/
+// obtainedMark/percentage/pass/onTime/attemptNumber) mirror the LATEST
+// attempt for callers that only want a quick summary (e.g. a collapsed
+// table row before expanding), while `attempts` carries the full history.
 const buildTestRecord = ({
   exam,
   subjectName,
   subTopicName,
-  submission,
+  submissions,
   markConfig,
   isEligible,
 }) => {
@@ -66,35 +92,52 @@ const buildTestRecord = ({
     totalPossibleMarks,
   };
 
-  if (submission) {
-    const percentage = totalPossibleMarks
-      ? Math.round((submission.obtainedMark / totalPossibleMarks) * 1000) / 10
-      : 0;
+  const sortedSubmissions = [...(submissions || [])].sort(
+    (a, b) => a.attemptNumber - b.attemptNumber
+  );
+
+  const attempts = sortedSubmissions.map((submission) =>
+    buildAttemptRecord({
+      submission,
+      totalPossibleMarks,
+      scheduledDate: exam.scheduledDate,
+    })
+  );
+
+  if (attempts.length > 0) {
+    const latest = attempts[attempts.length - 1];
 
     return {
       ...base,
       status: "Completed",
-      completedAt: submission.completedAt || submission.updatedAt,
-      attemptNumber: submission.attemptNumber,
-      obtainedMark: submission.obtainedMark,
-      percentage,
-      pass: submission.pass,
-      onTime: isOnTime(
-        submission.completedAt || submission.updatedAt,
-        exam.scheduledDate
-      ),
+      attemptsCount: attempts.length,
+      attempts,
+      // Latest-attempt summary fields, kept for callers/UI that only need
+      // a quick "this test" glance before expanding the full attempt list.
+      completedAt: latest.completedAt,
+      attemptNumber: latest.attemptNumber,
+      obtainedMark: latest.obtainedMark,
+      percentage: latest.percentage,
+      pass: latest.pass,
+      onTime: latest.onTime,
+      speedPercent: latest.speedPercent,
+      accuracyPercent: latest.accuracyPercent,
     };
   }
 
   return {
     ...base,
     status: "Pending",
+    attemptsCount: 0,
+    attempts: [],
     completedAt: null,
     attemptNumber: null,
     obtainedMark: null,
     percentage: null,
     pass: null,
     onTime: null,
+    speedPercent: null,
+    accuracyPercent: null,
     isEligible: !!isEligible, // only meaningful for the student view
   };
 };
@@ -146,18 +189,17 @@ const getStudentTestIndex = async (req, res) => {
     const [submissions, passes, markConfig] = await Promise.all([
       examSubmissionSchema
         .find({ userId, examId: { $in: examIds }, status: "completed" })
-        .sort({ attemptNumber: -1 }),
+        .sort({ attemptNumber: 1 }),
       examPassModel.find({ userId, pass: true }).select("subject subTopic order"),
       getMarkConfig(),
     ]);
 
-    // Latest completed submission per exam (highest attemptNumber wins).
-    const latestSubmissionByExam = new Map();
+    // ALL completed submissions per exam (every attempt, not just latest).
+    const submissionsByExam = new Map();
     for (const sub of submissions) {
       const key = sub.examId.toString();
-      if (!latestSubmissionByExam.has(key)) {
-        latestSubmissionByExam.set(key, sub);
-      }
+      if (!submissionsByExam.has(key)) submissionsByExam.set(key, []);
+      submissionsByExam.get(key).push(sub);
     }
 
     const passedOrdersByKey = new Map();
@@ -177,7 +219,7 @@ const getStudentTestIndex = async (req, res) => {
       );
       const key = `${exam.subject}-${exam.subTopic}`;
       const passedOrders = passedOrdersByKey.get(key) || new Set();
-      const submission = latestSubmissionByExam.get(exam._id.toString());
+      const examSubmissions = submissionsByExam.get(exam._id.toString()) || [];
 
       const isEligible =
         exam.order === 1 || passedOrders.has(exam.order - 1);
@@ -185,14 +227,14 @@ const getStudentTestIndex = async (req, res) => {
       // A test is "assigned" to this student once it's unlocked for them
       // or they've already completed it — a still-locked future test in
       // the sequence isn't shown yet, same as the existing Available tab.
-      if (!submission && !isEligible) continue;
+      if (examSubmissions.length === 0 && !isEligible) continue;
 
       records.push(
         buildTestRecord({
           exam,
           subjectName: subject?.name || "Unknown Subject",
           subTopicName: subTopic?.name || "Unknown Subtopic",
-          submission,
+          submissions: examSubmissions,
           markConfig,
           isEligible,
         })
@@ -242,17 +284,16 @@ const getAdminTestTracking = async (req, res) => {
       }).select("username email category isDisabled"),
       examSubmissionSchema
         .find({ examId: { $in: examIds }, status: "completed" })
-        .sort({ attemptNumber: -1 }),
+        .sort({ attemptNumber: 1 }),
       getMarkConfig(),
     ]);
 
-    // Latest completed submission per (exam, student) pair.
-    const latestSubmissionByExamAndUser = new Map();
+    // ALL completed submissions per (exam, student) pair (every attempt).
+    const submissionsByExamAndUser = new Map();
     for (const sub of submissions) {
       const key = `${sub.examId}-${sub.userId}`;
-      if (!latestSubmissionByExamAndUser.has(key)) {
-        latestSubmissionByExamAndUser.set(key, sub);
-      }
+      if (!submissionsByExamAndUser.has(key)) submissionsByExamAndUser.set(key, []);
+      submissionsByExamAndUser.get(key).push(sub);
     }
 
     const subjectById = new Map(subjects.map((s) => [s._id.toString(), s]));
@@ -272,15 +313,14 @@ const getAdminTestTracking = async (req, res) => {
       const studentsInCategory = studentsByCategory.get(subject?.category) || [];
 
       for (const student of studentsInCategory) {
-        const submission = latestSubmissionByExamAndUser.get(
-          `${exam._id}-${student._id}`
-        );
+        const examSubmissions =
+          submissionsByExamAndUser.get(`${exam._id}-${student._id}`) || [];
 
         const record = buildTestRecord({
           exam,
           subjectName: subject?.name || "Unknown Subject",
           subTopicName: subTopic?.name || "Unknown Subtopic",
-          submission,
+          submissions: examSubmissions,
           markConfig,
         });
 

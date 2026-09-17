@@ -157,11 +157,16 @@ const loginUser = async (req, res) => {
       { expiresIn: "2d" }
     );
 
-    await userModel.findByIdAndUpdate(user._id, { sessionToken: token });
+    const now = new Date();
+    await userModel.findByIdAndUpdate(user._id, {
+      sessionToken: token,
+      lastLoginAt: now,
+    });
 
     // Remove password from user object before sending
     const userResponse = { ...user.toObject() };
     delete userResponse.password;
+    userResponse.lastLoginAt = now;
 
     res.status(200).json({ user: userResponse, token });
   } catch (error) {

@@ -7,6 +7,9 @@ const attemptCounterModel = require("../models/attemptCounterModel");
 const userModel = require("../models/userModel");
 const examModel = require("../models/examModel");
 const jwt = require("jsonwebtoken");
+const {
+  calculateSpeedAndAccuracy,
+} = require("../utils/ExamSubmissionHelper");
 
 describe("Data Integrity Tests", () => {
   let authToken;
@@ -252,6 +255,140 @@ describe("Data Integrity Tests", () => {
 
       const validatedMarks = validateMarks(obtainedMarks, maximumMarks);
       expect(validatedMarks).toBe(0);
+    });
+  });
+
+  describe("Part A: 3 attempts + Speed/Accuracy", () => {
+    it("attemptCounterModel defaults maxAllowedAttempts to 3", async () => {
+      const testUserId = new mongoose.Types.ObjectId();
+      const testExamId = new mongoose.Types.ObjectId();
+
+      const counter = await attemptCounterModel.create({
+        userId: testUserId,
+        examId: testExamId,
+      });
+
+      expect(counter.maxAllowedAttempts).toBe(3);
+
+      await attemptCounterModel.deleteOne({ _id: counter._id });
+    });
+
+    it("allows 3 independent completed attempts on the same exam without a duplicate-key collision", async () => {
+      const testUserId = new mongoose.Types.ObjectId();
+      const testExamId = new mongoose.Types.ObjectId();
+
+      for (let attemptNumber = 1; attemptNumber <= 3; attemptNumber++) {
+        const submission = await examSubmissionSchema.create({
+          userId: testUserId,
+          examId: testExamId,
+          attemptNumber,
+          status: "completed",
+          examData: [],
+          obtainedMark: attemptNumber * 10,
+        });
+        expect(submission.attemptNumber).toBe(attemptNumber);
+      }
+
+      const all = await examSubmissionSchema
+        .find({ userId: testUserId, examId: testExamId })
+        .sort({ attemptNumber: 1 });
+      expect(all.length).toBe(3);
+
+      // A 4th attempt at the same attemptNumber sequence is exactly what
+      // the /attend-exam completedCount >= maxAllowedAttempts (default 3)
+      // gate blocks before a submission is ever created — simulate that
+      // gate directly here since it doesn't depend on unique-index behavior.
+      const completedCount = await examSubmissionSchema.countDocuments({
+        userId: testUserId,
+        examId: testExamId,
+        status: "completed",
+      });
+      const maxAllowedAttempts = 3; // default, no admin grant on record
+      expect(completedCount >= maxAllowedAttempts).toBe(true);
+
+      await examSubmissionSchema.deleteMany({ userId: testUserId, examId: testExamId });
+    });
+
+    it("calculateSpeedAndAccuracy matches hand-calculated values for a mixed answer set", () => {
+      // 10 total questions: 6 attended (5 correct, 1 partially correct), 4 skipped
+      const enhancedExamData = [
+        { isRight: "Correct" },
+        { isRight: "Correct" },
+        { isRight: "Correct" },
+        { isRight: "Correct" },
+        { isRight: "Correct" },
+        { isRight: "Partially Correct" },
+        { isRight: "Skipped" },
+        { isRight: "Skipped" },
+        { isRight: "Skipped" },
+        { isRight: "Skipped" },
+      ];
+
+      const result = calculateSpeedAndAccuracy(enhancedExamData, 10);
+
+      expect(result.questionsAttended).toBe(6);
+      expect(result.speedPercent).toBeCloseTo(60, 5); // 6/10 * 100
+      expect(result.accuracyPercent).toBeCloseTo((5 / 6) * 100, 5); // 83.33...
+    });
+
+    it("calculateSpeedAndAccuracy returns null accuracy when nothing was attended", () => {
+      const enhancedExamData = [
+        { isRight: "Skipped" },
+        { isRight: "Skipped" },
+      ];
+
+      const result = calculateSpeedAndAccuracy(enhancedExamData, 2);
+
+      expect(result.questionsAttended).toBe(0);
+      expect(result.speedPercent).toBe(0);
+      expect(result.accuracyPercent).toBeNull();
+    });
+
+    it("manuallyPassExam's attempt-number resolution never collides with an existing attempt 1", async () => {
+      const testUserId = new mongoose.Types.ObjectId();
+      const testExamId = new mongoose.Types.ObjectId();
+
+      // Student already has a real attempt 1 on record (e.g. they failed it).
+      await examSubmissionSchema.create({
+        userId: testUserId,
+        examId: testExamId,
+        attemptNumber: 1,
+        status: "completed",
+        examData: [],
+        obtainedMark: 5,
+        pass: false,
+      });
+      // ...and the counter reflects that a real attempt was taken.
+      await attemptCounterModel.create({
+        userId: testUserId,
+        examId: testExamId,
+        currentAttempt: 1,
+      });
+
+      // This mirrors the fixed manuallyPassExam logic: resolve the next
+      // attempt number atomically instead of hardcoding attemptNumber: 1.
+      const counter = await attemptCounterModel.findOneAndUpdate(
+        { userId: testUserId, examId: testExamId },
+        { $inc: { currentAttempt: 1 } },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+      );
+
+      await expect(
+        examSubmissionSchema.create({
+          userId: testUserId,
+          examId: testExamId,
+          attemptNumber: counter.currentAttempt,
+          status: "completed",
+          examData: [],
+          obtainedMark: 100,
+          pass: true,
+        })
+      ).resolves.toBeDefined();
+
+      expect(counter.currentAttempt).toBe(2); // not a collision with attempt 1
+
+      await examSubmissionSchema.deleteMany({ userId: testUserId, examId: testExamId });
+      await attemptCounterModel.deleteMany({ userId: testUserId, examId: testExamId });
     });
   });
 

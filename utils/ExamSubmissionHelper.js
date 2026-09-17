@@ -214,6 +214,31 @@ const validateMarks = (obtainedMarks, maximumMarks) => {
   return obtainedMarks;
 };
 
+/**
+ * Calculate Speed % and Accuracy % for a completed submission.
+ * Speed % = (questions attended / total questions) * 100.
+ * Accuracy % = (correct answers / questions attended) * 100, or null when
+ * zero questions were attended (avoids a divide-by-zero / misleading 0%).
+ *
+ * Deliberate scoping decision: only `isRight === "Correct"` counts toward
+ * accuracy's numerator — a "Partially Correct" answer counts as attended
+ * (it wasn't skipped) but not correct. This matches the admin's stated
+ * formula literally.
+ * @param {Array} enhancedExamData - submission.examData after evaluateQuestion (each has isRight)
+ * @param {Number} totalQuestions - total question count for the exam
+ * @returns {{questionsAttended: Number, speedPercent: Number, accuracyPercent: (Number|null)}}
+ */
+const calculateSpeedAndAccuracy = (enhancedExamData, totalQuestions) => {
+  const attended = enhancedExamData.filter((q) => q.isRight !== "Skipped").length;
+  const correct = enhancedExamData.filter((q) => q.isRight === "Correct").length;
+
+  return {
+    questionsAttended: attended,
+    speedPercent: totalQuestions > 0 ? (attended / totalQuestions) * 100 : 0,
+    accuracyPercent: attended > 0 ? (correct / attended) * 100 : null,
+  };
+};
+
 module.exports = {
   evaluateQuestion,
   calculateMarks,
@@ -222,4 +247,5 @@ module.exports = {
   resolveQuestionDuration,
   calculateTotalPossibleMarks,
   validateMarks,
+  calculateSpeedAndAccuracy,
 };

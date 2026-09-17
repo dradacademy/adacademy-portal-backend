@@ -4,6 +4,7 @@ const markModel = require("../models/markModel");
 const questionModel = require("../models/questionModel");
 const Subject = require("../models/subjectModel");
 const examPassModel = require("../models/examPassModel");
+const attemptCounterModel = require("../models/attemptCounterModel");
 const { ensureMarkConfigExists } = require("./markController");
 const { retryTransaction } = require("../utils/transactionHelper");
 const {
@@ -199,10 +200,20 @@ const manuallyPassExam = async (req, res) => {
 
     const obtainedMark = calculateTotalPossibleMarks(exam.questions, markData);
 
+    // Resolve the next attempt number the same atomic way /attend-exam does
+    // (findOneAndUpdate + $inc, upsert), so a manually-passed submission
+    // never collides with the unique {userId, examId, attemptNumber} index
+    // when the student already has real attempts on record.
+    const counter = await attemptCounterModel.findOneAndUpdate(
+      { userId, examId: exam._id },
+      { $inc: { currentAttempt: 1 } },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+
     await examSubmissionSchema.create({
       userId,
       examId: exam._id,
-      attemptNumber: 1,
+      attemptNumber: counter.currentAttempt,
       obtainedMark,
       examData: enhancedExamData,
       pass: true,

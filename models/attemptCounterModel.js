@@ -18,14 +18,14 @@ const attemptCounterSchema = new mongoose.Schema(
       required: true,
     },
     // How many attempts this student is allowed on this exam. Defaults to
-    // 1 (the normal "attempt once" rule) — an admin can raise this for a
-    // specific student+exam pair to grant a second (or further) attempt,
-    // via the Controllers/Control Panel. This is the ONLY way a student
-    // ever gets more than one attempt; students can never raise this
-    // themselves.
+    // 3 (each attempt independent and separately tracked) — an admin can
+    // raise this further for a specific student+exam pair to grant a 4th
+    // (or later) attempt, via the Controllers/Control Panel. This is the
+    // ONLY way a student ever gets more attempts than the default;
+    // students can never raise this themselves.
     maxAllowedAttempts: {
       type: Number,
-      default: 1,
+      default: 3,
       required: true,
     },
     grantedBy: {

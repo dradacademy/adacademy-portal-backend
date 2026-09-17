@@ -65,6 +65,18 @@ const ExamSubmissionSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    // Speed % = (questions attended / total questions) * 100. Populated at
+    // grading time in submitExam. Null until then.
+    speedPercent: {
+      type: Number,
+      default: null,
+    },
+    // Accuracy % = (correct answers / questions attended) * 100. Null when
+    // the student attended zero questions (undefined, not zero).
+    accuracyPercent: {
+      type: Number,
+      default: null,
+    },
     reviews: [
       {
         evaluator: {

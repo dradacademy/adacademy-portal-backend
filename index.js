@@ -40,7 +40,19 @@ app.set("trust proxy", 1);
 //   });
 // } else {
   app.use(cookieParser());
-  app.use(express.json());
+  // `verify` stashes the raw request body bytes on req.rawBody, in addition
+  // to the normal parsed req.body — needed to verify Cloudflare Stream's
+  // webhook HMAC signature (see recordedClassController.js's
+  // verifyWebhookSignature), which is computed over the exact raw bytes,
+  // not a re-serialization of the parsed JSON (which can differ in
+  // whitespace/key order). Every other route is unaffected.
+  app.use(
+    express.json({
+      verify: (req, res, buf) => {
+        req.rawBody = buf.toString("utf8");
+      },
+    }),
+  );
   app.use(express.urlencoded({ extended: true }));
 
   // CLIENT_URL is the one canonical frontend URL (also used to build the
@@ -90,6 +102,9 @@ app.set("trust proxy", 1);
     require("./routes/enrollmentLeadRoute"),
   );
   app.use("/api/content", require("./routes/contentRoute"));
+  app.use("/api/recorded-classes", require("./routes/recordedClassRoute"));
+  app.use("/api/videos", require("./routes/videoRoute"));
+  app.use("/api/enrollments", require("./routes/enrollmentRoute"));
   // Public /careers application form — no login required, same spam-limit
   // reasoning as the enrollment-leads form above.
   app.use(
@@ -110,6 +125,9 @@ app.set("trust proxy", 1);
     app.listen(PORT, () => {
       console.log(`Server is running on port ${PORT}`);
     });
+    // Recorded-class video storage cost control — a no-op sweep until an
+    // admin configures a retention window (see jobs/videoRetentionJob.js).
+    require("./jobs/videoRetentionJob").startVideoRetentionScheduler();
   }
 
   // --- Graceful Shutdown ---

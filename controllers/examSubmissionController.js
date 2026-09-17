@@ -14,6 +14,7 @@ const {
   resolveQuestionDuration,
   calculateTotalPossibleMarks,
   validateMarks,
+  calculateSpeedAndAccuracy,
 } = require("../utils/ExamSubmissionHelper");
 const durationModel = require("../models/durationModel");
 const { retryTransaction } = require("../utils/transactionHelper");
@@ -598,6 +599,12 @@ const submitExam = async (req, res) => {
       // 9. Calculate server-side time taken (cap at allowed duration)
       const serverTimeTaken = Math.min(timeTakenSeconds, allowedDuration);
 
+      // 9b. Calculate Speed % / Accuracy % for this attempt
+      const { speedPercent, accuracyPercent } = calculateSpeedAndAccuracy(
+        enhancedExamData,
+        examDetails.questions.length
+      );
+
       // 10. Update submission
       existingSubmission.timetaken = serverTimeTaken;
       existingSubmission.obtainedMark = Number(validatedMarks.toFixed(2));
@@ -605,6 +612,9 @@ const submitExam = async (req, res) => {
       existingSubmission.pass = validatedMarks >= passMark;
       existingSubmission.status = "completed";
       existingSubmission.completedAt = new Date();
+      existingSubmission.speedPercent = Number(speedPercent.toFixed(2));
+      existingSubmission.accuracyPercent =
+        accuracyPercent === null ? null : Number(accuracyPercent.toFixed(2));
 
       await existingSubmission.save({ session });
 

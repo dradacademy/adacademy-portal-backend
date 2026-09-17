@@ -53,6 +53,13 @@ const userSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    // Set on every successful login (see loginUser in userController.js).
+    // Powers the admin's "last active" view of a student — activity
+    // recency outside of test performance.
+    lastLoginAt: {
+      type: Date,
+      default: null,
+    },
   },
   {
     timestamps: true,
