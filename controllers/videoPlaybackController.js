@@ -2,14 +2,13 @@ const recordedClassModel = require("../models/recordedClassModel");
 const videoProgressModel = require("../models/videoProgressModel");
 const enrollmentModel = require("../models/enrollmentModel");
 const { isEnrollmentActive } = require("../models/enrollmentModel");
-const { mintPlaybackToken, getCustomerCode } = require("../utils/cloudflareStream");
 
 // GET /api/videos/available (student) — every ready, active recording in
 // this student's category, annotated with their own watch progress (for
 // "Continue Watching — mm:ss" / percent-watched in the list). Does NOT
 // check enrollment here — a student should still SEE what's available
 // (and why it's locked) even if their enrollment has lapsed; enrollment is
-// enforced at playback-token time (below), which is the actual access
+// enforced at playback-access time (below), which is the actual access
 // control chokepoint.
 const listAvailableVideos = async (req, res) => {
   try {
@@ -19,7 +18,7 @@ const listAvailableVideos = async (req, res) => {
 
     const [videos, enrollment, progressRows] = await Promise.all([
       recordedClassModel
-        .find({ category: req.user.category, status: "ready", active: true })
+        .find({ category: req.user.category, active: true })
         .select("title description category subject recordedDate durationSeconds")
         .sort({ recordedDate: -1 }),
       enrollmentModel.findOne({
@@ -68,17 +67,24 @@ const listAvailableVideos = async (req, res) => {
 };
 
 // GET /api/videos/:id/playback-token (student) — the actual access-control
-// chokepoint. Requires ALL of: video exists/ready/active, category match,
-// AND an active (non-revoked, non-expired) Enrollment record. On success,
-// mints a short-lived Cloudflare Stream signed token — the frontend hands
-// this straight to Cloudflare's Stream Player, which serves HLS-only, with
-// no download affordance and no raw file URL ever exposed to the client.
+// chokepoint, despite the route name (kept for frontend compatibility).
+// Requires ALL of: video exists/active, category match, AND an active
+// (non-revoked, non-expired) Enrollment record. On success, returns the
+// YouTube video ID for the frontend's YouTube IFrame Player to embed.
+//
+// Real, honest limitation versus the Cloudflare Stream approach this
+// replaced: this check controls who gets IN-APP access to press play, but
+// once a video is playing it's an ordinary YouTube embed — there's no
+// signed/expiring token and no way to fully block a determined viewer from
+// downloading or recording it by other means. The video is uploaded as
+// Unlisted on YouTube (not publicly searchable), but anyone who obtains
+// the raw watch link directly on youtube.com can still open it there.
 const getPlaybackToken = async (req, res) => {
   try {
     const { id } = req.params;
 
     const video = await recordedClassModel.findById(id);
-    if (!video || video.status !== "ready" || !video.active) {
+    if (!video || !video.active) {
       return res.status(404).json({
         success: false,
         message: "This recording is not available.",
@@ -105,16 +111,9 @@ const getPlaybackToken = async (req, res) => {
       });
     }
 
-    const signedToken = mintPlaybackToken(video.cloudflareVideoUid);
-
     res.status(200).json({
       success: true,
-      videoUid: video.cloudflareVideoUid,
-      signedToken,
-      // The Stream Player iframe embed needs this to build its URL
-      // (https://customer-<CODE>.cloudflarestream.com/<token>/iframe) —
-      // see the CLOUDFLARE_STREAM_CUSTOMER_CODE env var.
-      customerCode: getCustomerCode(),
+      youtubeVideoId: video.youtubeVideoId,
     });
   } catch (error) {
     res.status(500).json({
@@ -129,7 +128,7 @@ const getPlaybackToken = async (req, res) => {
 // 15-20s) by the player while playing, plus once on pause/unmount. Upserts
 // the rolled-up watch-time counters; does NOT re-check enrollment (a
 // student mid-way through an already-authorized playback session isn't cut
-// off mid-video by a progress ping — the NEXT playback-token request is
+// off mid-video by a progress ping — the NEXT playback-access request is
 // where a lapsed enrollment takes effect).
 const recordProgress = async (req, res) => {
   try {

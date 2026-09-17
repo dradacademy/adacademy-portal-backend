@@ -1,148 +1,60 @@
-const crypto = require("crypto");
 const recordedClassModel = require("../models/recordedClassModel");
 const videoProgressModel = require("../models/videoProgressModel");
 const userModel = require("../models/userModel");
-const {
-  createDirectUploadUrl,
-  deleteStreamVideo,
-} = require("../utils/cloudflareStream");
-const {
-  getVideoRetentionDays,
-  setVideoRetentionDays,
-  runVideoRetentionSweep,
-} = require("../jobs/videoRetentionJob");
+const { extractYoutubeVideoId } = require("../utils/youtube");
 
-// POST /api/recorded-classes/upload-url (admin only)
-// Requests a one-time direct-creator-upload URL from Cloudflare Stream and
-// creates the RecordedClass metadata row (status: "uploading"). The
-// ADMIN'S BROWSER then uploads the actual video file straight to the
-// returned uploadUrl — never through this server — so multi-hour class
-// recordings never hit our own request size/timeout limits.
-const requestUploadUrl = async (req, res) => {
+// POST /api/recorded-classes (admin only) — the admin uploads the class
+// recording to their own YouTube account (as Unlisted, so it isn't publicly
+// searchable) and pastes the resulting link/ID here. No file ever passes
+// through our server or a third-party API — this just records the
+// metadata + video ID.
+const createRecordedClass = async (req, res) => {
   try {
-    const { title, description, category, subject, recordedDate } = req.body;
+    const {
+      title,
+      description,
+      category,
+      subject,
+      recordedDate,
+      youtubeUrl,
+      durationSeconds,
+    } = req.body;
 
-    if (!title || !category || !recordedDate) {
+    if (!title || !category || !recordedDate || !youtubeUrl) {
       return res.status(400).json({
         success: false,
-        message: "title, category, and recordedDate are required.",
+        message: "title, category, recordedDate, and a YouTube link are required.",
       });
     }
 
-    const { uploadUrl, videoUid } = await createDirectUploadUrl();
+    const youtubeVideoId = extractYoutubeVideoId(youtubeUrl);
+    if (!youtubeVideoId) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "That doesn't look like a valid YouTube link. Paste the full video URL (e.g. https://youtu.be/VIDEOID) or the 11-character video ID.",
+      });
+    }
 
     const recordedClass = await recordedClassModel.create({
       title,
       description: description || "",
       category,
       subject: subject || null,
-      cloudflareVideoUid: videoUid,
+      youtubeVideoId,
       recordedDate,
+      durationSeconds:
+        typeof durationSeconds === "number" && durationSeconds > 0
+          ? Math.round(durationSeconds)
+          : null,
       uploadedBy: req.user._id,
-      status: "uploading",
     });
 
-    res.status(200).json({
-      success: true,
-      uploadUrl,
-      recordedClassId: recordedClass._id,
-    });
+    res.status(201).json({ success: true, data: recordedClass });
   } catch (error) {
     res.status(500).json({
       success: false,
-      message: "Failed to request an upload URL from Cloudflare Stream.",
-      error: error.message,
-    });
-  }
-};
-
-// Verify Cloudflare's webhook signature when a signing secret is
-// configured (CLOUDFLARE_STREAM_WEBHOOK_SECRET — the secret returned when
-// the webhook is created/retrieved via the Cloudflare API). If no secret
-// has been set up yet, the webhook is still accepted (so the admin isn't
-// blocked before finishing every last piece of Cloudflare setup) but this
-// is logged — configure the secret in Railway env as soon as possible so a
-// forged request can't flip a video's status.
-//
-// Verification per Cloudflare's documented scheme: the `Webhook-Signature`
-// header is "time=<unix ts>,sig1=<hex hmac>"; the signed string is
-// `${time}.${rawRequestBody}` (HMAC-SHA256 with the webhook secret). This
-// relies on req.rawBody (captured globally in index.js's express.json()
-// verify callback) rather than re-serializing req.body, since a
-// re-serialization can differ from Cloudflare's original bytes.
-// https://developers.cloudflare.com/stream/manage-video-library/using-webhooks/
-const verifyWebhookSignature = (req) => {
-  const secret = process.env.CLOUDFLARE_STREAM_WEBHOOK_SECRET;
-  if (!secret) {
-    console.warn(
-      "CLOUDFLARE_STREAM_WEBHOOK_SECRET is not set — skipping webhook signature verification."
-    );
-    return true;
-  }
-
-  const signatureHeader = req.headers["webhook-signature"];
-  if (!signatureHeader) return false;
-
-  // Cloudflare's header format: "time=<ts>,sig1=<hex hmac>"
-  const parts = Object.fromEntries(
-    signatureHeader.split(",").map((p) => p.split("="))
-  );
-  if (!parts.time || !parts.sig1) return false;
-
-  const payload = `${parts.time}.${req.rawBody || JSON.stringify(req.body)}`;
-  const expected = crypto
-    .createHmac("sha256", secret)
-    .update(payload)
-    .digest("hex");
-
-  try {
-    return crypto.timingSafeEqual(
-      Buffer.from(expected),
-      Buffer.from(parts.sig1)
-    );
-  } catch {
-    return false;
-  }
-};
-
-// POST /api/recorded-classes/webhook (Cloudflare Stream calls this — no
-// user auth, verified by signature instead)
-const handleUploadWebhook = async (req, res) => {
-  try {
-    if (!verifyWebhookSignature(req)) {
-      return res.status(401).json({ success: false, message: "Invalid webhook signature." });
-    }
-
-    const videoUid = req.body?.uid;
-    const state = req.body?.status?.state;
-    const durationSeconds = req.body?.duration;
-
-    if (!videoUid) {
-      return res.status(400).json({ success: false, message: "Missing video uid." });
-    }
-
-    const update = {};
-    if (state === "ready") {
-      update.status = "ready";
-      if (typeof durationSeconds === "number" && durationSeconds > 0) {
-        update.durationSeconds = Math.round(durationSeconds);
-      }
-    } else if (state === "error") {
-      update.status = "error";
-    }
-
-    if (Object.keys(update).length > 0) {
-      await recordedClassModel.findOneAndUpdate(
-        { cloudflareVideoUid: videoUid },
-        update
-      );
-    }
-
-    res.status(200).json({ success: true });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Failed to process Cloudflare Stream webhook.",
+      message: "Failed to save recorded class.",
       error: error.message,
     });
   }
@@ -171,16 +83,24 @@ const listRecordedClasses = async (req, res) => {
   }
 };
 
-// PATCH /api/recorded-classes/:id (admin only) — edit metadata and/or
-// retire (active: false) a recording. Retiring never hard-deletes the row
-// (watch-history/analytics keep working); Cloudflare storage deletion is a
-// separate, explicit step (the retention job, or a future "delete forever"
-// admin action) since retiring just hides it from students.
+// PATCH /api/recorded-classes/:id (admin only) — edit metadata (including
+// swapping the YouTube link itself, or filling in duration later) and/or
+// retire (active: false) a recording. Retiring never deletes the row
+// (watch-history/analytics keep working); the video itself lives on
+// YouTube and is managed there directly by the admin.
 const updateRecordedClass = async (req, res) => {
   try {
     const { id } = req.params;
-    const { title, description, category, subject, recordedDate, active } =
-      req.body;
+    const {
+      title,
+      description,
+      category,
+      subject,
+      recordedDate,
+      youtubeUrl,
+      durationSeconds,
+      active,
+    } = req.body;
 
     const update = {};
     if (title !== undefined) update.title = title;
@@ -189,12 +109,26 @@ const updateRecordedClass = async (req, res) => {
     if (subject !== undefined) update.subject = subject || null;
     if (recordedDate !== undefined) update.recordedDate = recordedDate;
     if (active !== undefined) update.active = active;
+    if (durationSeconds !== undefined) {
+      update.durationSeconds =
+        typeof durationSeconds === "number" && durationSeconds > 0
+          ? Math.round(durationSeconds)
+          : null;
+    }
+    if (youtubeUrl !== undefined) {
+      const youtubeVideoId = extractYoutubeVideoId(youtubeUrl);
+      if (!youtubeVideoId) {
+        return res.status(400).json({
+          success: false,
+          message: "That doesn't look like a valid YouTube link or video ID.",
+        });
+      }
+      update.youtubeVideoId = youtubeVideoId;
+    }
 
-    const recordedClass = await recordedClassModel.findByIdAndUpdate(
-      id,
-      update,
-      { new: true }
-    );
+    const recordedClass = await recordedClassModel.findByIdAndUpdate(id, update, {
+      new: true,
+    });
 
     if (!recordedClass) {
       return res.status(404).json({ success: false, message: "Recorded class not found." });
@@ -210,28 +144,24 @@ const updateRecordedClass = async (req, res) => {
   }
 };
 
-// DELETE /api/recorded-classes/:id (admin only) — permanently deletes from
-// Cloudflare Stream storage AND marks the local row inactive. Distinct from
-// PATCH .../active:false (retire, reversible) — this is the "delete
-// forever" action and cannot be undone.
+// DELETE /api/recorded-classes/:id (admin only) — removes the metadata row
+// entirely. There's no separate "storage" to clean up (the video itself
+// stays on YouTube, managed there by the admin) — this just stops it from
+// showing up anywhere in the app. Existing videoProgress rows referencing
+// this id are left as historical data rather than cascade-deleted.
 const deleteRecordedClass = async (req, res) => {
   try {
     const { id } = req.params;
-    const recordedClass = await recordedClassModel.findById(id);
+    const recordedClass = await recordedClassModel.findByIdAndDelete(id);
     if (!recordedClass) {
       return res.status(404).json({ success: false, message: "Recorded class not found." });
     }
 
-    await deleteStreamVideo(recordedClass.cloudflareVideoUid);
-    recordedClass.active = false;
-    recordedClass.status = "error"; // no longer playable — storage is gone
-    await recordedClass.save();
-
-    res.status(200).json({ success: true, message: "Recorded class deleted from storage." });
+    res.status(200).json({ success: true, message: "Recorded class removed." });
   } catch (error) {
     res.status(500).json({
       success: false,
-      message: "Failed to delete recorded class from Cloudflare Stream.",
+      message: "Failed to delete recorded class.",
       error: error.message,
     });
   }
@@ -337,75 +267,11 @@ const getStudentVideoAnalytics = async (req, res) => {
   }
 };
 
-// GET /api/recorded-classes/settings/retention (admin only)
-const getRetentionSetting = async (req, res) => {
-  try {
-    const videoRetentionDays = await getVideoRetentionDays();
-    res.status(200).json({ success: true, data: { videoRetentionDays } });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Failed to fetch retention setting.",
-      error: error.message,
-    });
-  }
-};
-
-// PATCH /api/recorded-classes/settings/retention (admin only) — body:
-// { videoRetentionDays: Number | null }. null disables automatic deletion
-// (the default) — this is a deliberate opt-IN to irreversible storage
-// deletion, so the admin has to set it explicitly.
-const updateRetentionSetting = async (req, res) => {
-  try {
-    const { videoRetentionDays } = req.body;
-
-    if (
-      videoRetentionDays !== null &&
-      (typeof videoRetentionDays !== "number" || videoRetentionDays <= 0)
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: "videoRetentionDays must be a positive number of days, or null to disable.",
-      });
-    }
-
-    const settings = await setVideoRetentionDays(videoRetentionDays);
-    res.status(200).json({ success: true, data: settings });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Failed to update retention setting.",
-      error: error.message,
-    });
-  }
-};
-
-// POST /api/recorded-classes/settings/retention/run-now (admin only) —
-// manually trigger a retention sweep immediately, instead of waiting for
-// the daily scheduler (useful right after configuring a retention window,
-// or to confirm it's working).
-const runRetentionSweepNow = async (req, res) => {
-  try {
-    const result = await runVideoRetentionSweep();
-    res.status(200).json({ success: true, data: result });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Failed to run retention sweep.",
-      error: error.message,
-    });
-  }
-};
-
 module.exports = {
-  requestUploadUrl,
-  handleUploadWebhook,
+  createRecordedClass,
   listRecordedClasses,
   updateRecordedClass,
   deleteRecordedClass,
   getVideoAnalytics,
   getStudentVideoAnalytics,
-  getRetentionSetting,
-  updateRetentionSetting,
-  runRetentionSweepNow,
 };
