@@ -6,6 +6,7 @@ const examPassModel = require("../models/examPassModel");
 const attemptCounterModel = require("../models/attemptCounterModel");
 const reviewModel = require("../models/ReviewModel");
 const { retryTransaction } = require("../utils/transactionHelper");
+const { createNotification } = require("./notificationController");
 
 /**
  * For MCQ/MSQ: ensure correctAnswers contains only values
@@ -265,6 +266,26 @@ const createExam = async (req, res) => {
     const createdExam = await examModel
       .findOne({ examCode })
       .populate("questions");
+
+    // Notify students in this exam's category the moment it's posted live
+    // — never for a draft/inactive status. Best-effort: never fails the
+    // actual exam creation.
+    if (status === "active") {
+      Subject.findById(subject)
+        .select("category name")
+        .then((subjectDoc) => {
+          if (!subjectDoc) return;
+          return createNotification({
+            category: subjectDoc.category,
+            type: "test",
+            title: `New test posted: ${subjectDoc.name} (${examCode})`,
+            refId: createdExam._id,
+            refModel: "Exam",
+            createdBy: req.user._id,
+          });
+        })
+        .catch((err) => console.error("Failed to create test notification:", err.message));
+    }
 
     return res.status(201).json({
       success: true,

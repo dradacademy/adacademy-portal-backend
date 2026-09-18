@@ -65,4 +65,15 @@ const liveClassSchema = new mongoose.Schema(
 
 liveClassSchema.index({ category: 1, active: 1 });
 
+// How long this session has actually run so far — the denominator for a
+// student's live watch percentage (see liveAttendanceModel.js /
+// controllers/liveClassController.js). While still active this is a
+// moving target (now - startedAt); once ended it's fixed (endedAt -
+// startedAt). Never zero, so a percentage calculation never divides by 0.
+liveClassSchema.methods.getElapsedSeconds = function () {
+  const end = this.endedAt || new Date();
+  const seconds = (end.getTime() - new Date(this.startedAt).getTime()) / 1000;
+  return Math.max(1, Math.round(seconds));
+};
+
 module.exports = mongoose.model("LiveClass", liveClassSchema);

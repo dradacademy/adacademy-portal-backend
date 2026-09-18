@@ -60,6 +60,23 @@ const userSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    // Free-text grouping label the admin can set per student (e.g. "2026
+    // Morning Batch") — used only for filtering on the Student Progress
+    // dashboard; unlike `category` it isn't an access-control key.
+    batch: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    // A rolling watermark, not a per-notification read receipt: any
+    // Notification created after this timestamp (and matching the
+    // student's category, or global) counts as "new" for them — advanced
+    // to now() whenever they open the notification panel. See
+    // notificationModel.js / notificationController.js.
+    lastSeenNotificationsAt: {
+      type: Date,
+      default: null,
+    },
   },
   {
     timestamps: true,

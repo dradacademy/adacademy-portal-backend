@@ -2,6 +2,7 @@ const recordedClassModel = require("../models/recordedClassModel");
 const videoProgressModel = require("../models/videoProgressModel");
 const userModel = require("../models/userModel");
 const { extractYoutubeVideoId } = require("../utils/youtube");
+const { createNotification } = require("./notificationController");
 
 // POST /api/recorded-classes (admin only) — the admin uploads the class
 // recording to their own YouTube account (as Unlisted, so it isn't publicly
@@ -59,6 +60,17 @@ const createRecordedClass = async (req, res) => {
       }),
       uploadedBy: req.user._id,
     });
+
+    // Best-effort — a notification failing to write should never fail the
+    // actual upload.
+    createNotification({
+      category,
+      type: "video",
+      title: `New recorded class: ${title}`,
+      refId: recordedClass._id,
+      refModel: "RecordedClass",
+      createdBy: req.user._id,
+    }).catch((err) => console.error("Failed to create video notification:", err.message));
 
     res.status(201).json({ success: true, data: recordedClass });
   } catch (error) {
