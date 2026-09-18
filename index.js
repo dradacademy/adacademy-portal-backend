@@ -93,7 +93,13 @@ app.set("trust proxy", 1);
   app.use("/api/recorded-classes", require("./routes/recordedClassRoute"));
   app.use("/api/videos", require("./routes/videoRoute"));
   app.use("/api/live-classes", require("./routes/liveClassRoute"));
+  app.use("/api/attendance", require("./routes/attendanceRoute"));
+  app.use("/api/notifications", require("./routes/notificationRoute"));
   app.use("/api/enrollments", require("./routes/enrollmentRoute"));
+  app.use("/api/attachments", require("./routes/attachmentRoute"));
+  app.use("/api/answer-sheets", require("./routes/answerSheetRoute"));
+  app.use("/api/student-progress", require("./routes/studentProgressRoute"));
+  app.use("/api/student-profiles", require("./routes/studentProfileRoute"));
   // Public /careers application form — no login required, same spam-limit
   // reasoning as the enrollment-leads form above.
   app.use(

@@ -11,6 +11,7 @@ const {
   bulkCreateUsers,
   downloadUserTemplate,
   toggleUserActive,
+  updateStudentBatch,
 } = require("../controllers/userController");
 const upload = require("../utils/multerConfig");
 const {
@@ -79,6 +80,12 @@ router.patch(
   verifyToken,
   authorizeRoles("admin"),
   toggleUserActive
+);
+router.patch(
+  "/:userId/batch",
+  verifyToken,
+  authorizeRoles("admin"),
+  updateStudentBatch
 );
 
 module.exports = router;

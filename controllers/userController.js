@@ -7,7 +7,7 @@ const { EXAM_CATEGORIES } = require("../constants/examCategories");
 
 const registerUser = async (req, res) => {
   try {
-    const { registerNumber, username, email, password, role, category } = req.body;
+    const { registerNumber, username, email, password, role, category, batch } = req.body;
     if (!username || !email || !password || !role) {
       return res.status(400).json({ error: "All fields are required" });
     }
@@ -83,6 +83,7 @@ const registerUser = async (req, res) => {
       password: hashedPassword,
       role,
       category: role === "student" ? category : null,
+      batch: role === "student" ? batch || "" : "",
     });
     res.status(201).json({ user });
   } catch (error) {
@@ -571,6 +572,29 @@ const toggleUserActive = async (req, res) => {
   }
 };
 
+// PATCH /api/users/:userId/batch (admin only) — sets the free-text "batch"
+// grouping label (e.g. "2026 Morning Batch") used only for filtering on the
+// Student Progress dashboard; unlike `category` this never gates access to
+// anything.
+const updateStudentBatch = async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { batch } = req.body;
+
+    const user = await userModel
+      .findByIdAndUpdate(userId, { batch: batch || "" }, { new: true })
+      .select("-password");
+
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    res.status(200).json({ success: true, user });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 module.exports = {
   registerUser,
   loginUser,
@@ -582,4 +606,5 @@ module.exports = {
   getUserData,
   downloadUserTemplate,
   toggleUserActive,
+  updateStudentBatch,
 };
