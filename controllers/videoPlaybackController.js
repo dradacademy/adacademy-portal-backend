@@ -10,16 +10,27 @@ const { isEnrollmentActive } = require("../models/enrollmentModel");
 // (and why it's locked) even if their enrollment has lapsed; enrollment is
 // enforced at playback-access time (below), which is the actual access
 // control chokepoint.
+//
+// Also drops any recording whose per-video visibility window has elapsed
+// (default 7 days from recordedDate, admin-editable per video, or "never"
+// if the admin cleared it) — this is what makes a class "disappear after a
+// week" for students automatically, computed live on every request (same
+// pattern as enrollment expiry), with no scheduled job needed. It has
+// nothing to do with YouTube: the admin's video keeps existing there until
+// they delete it themselves, whenever they choose. Filtered in JS (not the
+// Mongo query) since the window can differ video-by-video.
 const listAvailableVideos = async (req, res) => {
   try {
     if (!req.user.category) {
       return res.status(200).json({ success: true, data: [] });
     }
 
-    const [videos, enrollment, progressRows] = await Promise.all([
+    const [allVideos, enrollment, progressRows] = await Promise.all([
       recordedClassModel
         .find({ category: req.user.category, active: true })
-        .select("title description category subject recordedDate durationSeconds")
+        .select(
+          "title description category subject recordedDate durationSeconds visibilityWindowDays active"
+        )
         .sort({ recordedDate: -1 }),
       enrollmentModel.findOne({
         userId: req.user._id,
@@ -27,6 +38,8 @@ const listAvailableVideos = async (req, res) => {
       }),
       videoProgressModel.find({ userId: req.user._id }),
     ]);
+
+    const videos = allVideos.filter((video) => video.isVisibleToStudents());
 
     const progressByVideoId = new Map(
       progressRows.map((p) => [p.videoId.toString(), p])
@@ -88,6 +101,16 @@ const getPlaybackToken = async (req, res) => {
       return res.status(404).json({
         success: false,
         message: "This recording is not available.",
+      });
+    }
+
+    // Same per-video visibility window as the list endpoint — checked again
+    // here so a direct/stale request can't play a video after it has aged
+    // out, even if the student already had the page open from before.
+    if (!video.isVisibleToStudents()) {
+      return res.status(404).json({
+        success: false,
+        message: "This recording is no longer available.",
       });
     }
 

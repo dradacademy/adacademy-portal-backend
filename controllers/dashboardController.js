@@ -1158,39 +1158,28 @@ const getStudentDetailedAnalysis = async (req, res) => {
       },
     };
 
-    // F. Pending tests count — exams eligible/unlocked for this student's
-    // category+progression that have no completed submission yet. Reuses
-    // the same order-based eligibility rule as getEligibleExamForUser /
-    // getStudentTestIndex (order 1 is always open; a later order unlocks
-    // once the previous order in the same subject+subtopic is passed).
+    // F. Pending tests count — every active exam in this student's category
+    // that has no completed submission yet. Every posted set is visible
+    // from the moment it's posted (no order/pass-based unlock sequence
+    // anymore — removed per admin request 2026-09-17), so this is now a
+    // plain "posted but not yet completed" count.
     let pendingTestsCount = 0;
     if (student.category) {
-      const [studentSubjects, studentPasses] = await Promise.all([
-        Subject.find({ category: student.category }).select("_id subtopics"),
-        examPassModel.find({ userId: studentId, pass: true }).select("subject subTopic order"),
-      ]);
+      const studentSubjects = await Subject.find({
+        category: student.category,
+      }).select("_id");
       const studentSubjectIds = studentSubjects.map((s) => s._id);
-
-      const studentPassedOrders = new Map();
-      for (const p of studentPasses) {
-        const key = `${p.subject}-${p.subTopic}`;
-        if (!studentPassedOrders.has(key)) studentPassedOrders.set(key, new Set());
-        studentPassedOrders.get(key).add(p.order);
-      }
 
       const activeExams = await Exam.find({
         subject: { $in: studentSubjectIds },
         status: "active",
-      }).select("_id subject subTopic order");
+      }).select("_id");
 
       const completedExamIdSet = new Set(completedExamIds);
 
-      pendingTestsCount = activeExams.filter((exam) => {
-        const key = `${exam.subject}-${exam.subTopic}`;
-        const passedOrders = studentPassedOrders.get(key) || new Set();
-        const isEligible = exam.order === 1 || passedOrders.has(exam.order - 1);
-        return isEligible && !completedExamIdSet.has(exam._id.toString());
-      }).length;
+      pendingTestsCount = activeExams.filter(
+        (exam) => !completedExamIdSet.has(exam._id.toString())
+      ).length;
     }
 
     // G. Video engagement — every recorded class this student has ANY

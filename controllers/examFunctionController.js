@@ -29,19 +29,6 @@ const getEligibleExamForUser = async (req, res) => {
       });
     }
 
-    // Fetch user's passed exams (order-based progression now, not level-based)
-    const userProgress = await examPassModel
-      .find({ userId, pass: true })
-      .select("subject subTopic order");
-
-    // Group passed orders by subject+subTopic for quick lookup
-    const passedOrdersByKey = new Map(); // `${subject}-${subTopic}` -> Set(order)
-    for (const p of userProgress) {
-      const key = `${p.subject}-${p.subTopic}`;
-      if (!passedOrdersByKey.has(key)) passedOrdersByKey.set(key, new Set());
-      passedOrdersByKey.get(key).add(p.order);
-    }
-
     // A student only ever sees exams within their own exam category — this
     // is the main chokepoint that keeps (say) a TNPSC AE student from ever
     // seeing GATE exams, since this endpoint is what the student dashboard
@@ -63,14 +50,13 @@ const getEligibleExamForUser = async (req, res) => {
 
     const flattenedExams = [];
 
-    // For every subject+subTopic, the "next eligible" exam is the first
-    // (lowest-order) exam not yet passed, provided its predecessor (order-1)
-    // has been passed (order 1 is always open).
+    // Every active exam (set) posted for a subject+subTopic is listed here,
+    // regardless of order and regardless of whether the student has
+    // completed or passed any other set — there's no sequential unlock
+    // anymore (removed per admin request 2026-09-17; previously only the
+    // first not-yet-passed exam per subtopic was ever surfaced here).
     for (const subject of allSubjects) {
       for (const subTopic of subject.subtopics) {
-        const key = `${subject._id}-${subTopic._id}`;
-        const passedOrders = passedOrdersByKey.get(key) || new Set();
-
         const exams = await examModel
           .find({
             subject: subject._id,
@@ -80,32 +66,21 @@ const getEligibleExamForUser = async (req, res) => {
           .sort({ order: 1 });
 
         for (const exam of exams) {
-          if (passedOrders.has(exam.order)) continue; // already passed, keep scanning
-
-          const isEligible =
-            exam.order === 1 || passedOrders.has(exam.order - 1);
-
-          if (isEligible) {
-            flattenedExams.push({
-              _id: exam._id,
-              subjectId: exam.subject,
-              subjectName: subject.name,
-              subTopicId: exam.subTopic,
-              subTopicName: subTopic.name,
-              questions: exam.questions,
-              order: exam.order,
-              status: exam.status,
-              createdAt: exam.createdAt,
-              updatedAt: exam.updatedAt,
-              __v: exam.__v,
-              examCode: exam.examCode,
-              passPercentage: exam.passPercentage,
-            });
-          }
-
-          // Only the first not-yet-passed exam in the sequence can ever be
-          // eligible — stop scanning further orders in this subtopic.
-          break;
+          flattenedExams.push({
+            _id: exam._id,
+            subjectId: exam.subject,
+            subjectName: subject.name,
+            subTopicId: exam.subTopic,
+            subTopicName: subTopic.name,
+            questions: exam.questions,
+            order: exam.order,
+            status: exam.status,
+            createdAt: exam.createdAt,
+            updatedAt: exam.updatedAt,
+            __v: exam.__v,
+            examCode: exam.examCode,
+            passPercentage: exam.passPercentage,
+          });
         }
       }
     }

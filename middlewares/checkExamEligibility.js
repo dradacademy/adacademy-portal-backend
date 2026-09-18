@@ -1,4 +1,3 @@
-const examPassModel = require("../models/examPassModel");
 const examModel = require("../models/examModel");
 
 const checkExamEligibility = async (req, res, next) => {
@@ -47,28 +46,15 @@ const checkExamEligibility = async (req, res, next) => {
     exam.subjectName = exam.subject.name;
     exam.subtopicName = matchingSubtopic ? matchingSubtopic.name : null;
 
-    // Progression is now order-based: exam order 1 is always open; any
-    // later exam requires the exam immediately before it (order - 1, in
-    // the same subject+subTopic) to have been passed.
-    let isEligible = exam.order === 1;
-
-    if (!isEligible) {
-      const previousExam = await examModel
-        .findOne({
-          subject: exam.subject._id,
-          subTopic: exam.subTopic,
-          order: exam.order - 1,
-        })
-        .lean();
-
-      isEligible =
-        !previousExam || // previous slot missing (e.g. deleted) — fail open
-        !!(await examPassModel.findOne({
-          userId,
-          examId: previousExam._id,
-          pass: true,
-        }));
-    }
+    // Every posted, active exam (set) is available to attend regardless of
+    // order and regardless of whether other sets in the same
+    // subject+subTopic have been completed or passed — there is no
+    // sequential unlock anymore (previously order 1 was always open and any
+    // later exam required the one immediately before it to be passed
+    // first; removed per admin request 2026-09-17 so all sets are visible
+    // and attemptable from the moment they're posted). The category check
+    // above remains the real access-control gate.
+    const isEligible = true;
 
     if (isEligible) {
       //  if (

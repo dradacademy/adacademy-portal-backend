@@ -5,15 +5,14 @@
 // scoped differently: a student only ever sees their own row, an admin
 // sees every student's row for every test in a category.
 //
-// "Assigned" tests intentionally use the existing category + order-based
-// eligibility model (no separate per-student roster/assignment feature):
-// a test is "assigned" to a student once it's unlocked for them (or they've
-// already completed it) — the same rule that already governs the
-// Available/Attended tabs and progression unlocking elsewhere in the app.
+// "Assigned" tests are simply every active test within the student's
+// category — every posted set is visible from the moment it's posted,
+// with no order/pass-based unlock sequence (removed per admin request
+// 2026-09-17; previously a later set only unlocked once the one before it,
+// in the same subject+subTopic, had been passed).
 
 const examModel = require("../models/examModel");
 const examSubmissionSchema = require("../models/examSubmissionSchema");
-const examPassModel = require("../models/examPassModel");
 const Subject = require("../models/subjectModel");
 const User = require("../models/userModel");
 const markModel = require("../models/markModel");
@@ -186,11 +185,10 @@ const getStudentTestIndex = async (req, res) => {
 
     const examIds = exams.map((e) => e._id);
 
-    const [submissions, passes, markConfig] = await Promise.all([
+    const [submissions, markConfig] = await Promise.all([
       examSubmissionSchema
         .find({ userId, examId: { $in: examIds }, status: "completed" })
         .sort({ attemptNumber: 1 }),
-      examPassModel.find({ userId, pass: true }).select("subject subTopic order"),
       getMarkConfig(),
     ]);
 
@@ -202,14 +200,13 @@ const getStudentTestIndex = async (req, res) => {
       submissionsByExam.get(key).push(sub);
     }
 
-    const passedOrdersByKey = new Map();
-    for (const p of passes) {
-      const key = `${p.subject}-${p.subTopic}`;
-      if (!passedOrdersByKey.has(key)) passedOrdersByKey.set(key, new Set());
-      passedOrdersByKey.get(key).add(p.order);
-    }
-
     const subjectById = new Map(subjects.map((s) => [s._id.toString(), s]));
+
+    // Every posted, active test is "assigned" to the student from the
+    // moment it's posted — there's no order/pass-based unlock sequence
+    // anymore (removed per admin request 2026-09-17), so isEligible is
+    // always true here.
+    const isEligible = true;
 
     const records = [];
     for (const exam of exams) {
@@ -217,17 +214,7 @@ const getStudentTestIndex = async (req, res) => {
       const subTopic = subject?.subtopics?.find(
         (st) => st._id.toString() === exam.subTopic.toString()
       );
-      const key = `${exam.subject}-${exam.subTopic}`;
-      const passedOrders = passedOrdersByKey.get(key) || new Set();
       const examSubmissions = submissionsByExam.get(exam._id.toString()) || [];
-
-      const isEligible =
-        exam.order === 1 || passedOrders.has(exam.order - 1);
-
-      // A test is "assigned" to this student once it's unlocked for them
-      // or they've already completed it — a still-locked future test in
-      // the sequence isn't shown yet, same as the existing Available tab.
-      if (examSubmissions.length === 0 && !isEligible) continue;
 
       records.push(
         buildTestRecord({

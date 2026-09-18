@@ -18,6 +18,7 @@ const createRecordedClass = async (req, res) => {
       recordedDate,
       youtubeUrl,
       durationSeconds,
+      visibilityWindowDays,
     } = req.body;
 
     if (!title || !category || !recordedDate || !youtubeUrl) {
@@ -47,6 +48,15 @@ const createRecordedClass = async (req, res) => {
         typeof durationSeconds === "number" && durationSeconds > 0
           ? Math.round(durationSeconds)
           : null,
+      // Per-video "visible to students for N days" — null means "never
+      // expires"; omitted entirely means the schema default (7) applies.
+      // See models/recordedClassModel.js for how this is enforced.
+      ...(visibilityWindowDays !== undefined && {
+        visibilityWindowDays:
+          visibilityWindowDays === null
+            ? null
+            : Math.max(0, Math.round(Number(visibilityWindowDays)) || 0),
+      }),
       uploadedBy: req.user._id,
     });
 
@@ -99,6 +109,7 @@ const updateRecordedClass = async (req, res) => {
       recordedDate,
       youtubeUrl,
       durationSeconds,
+      visibilityWindowDays,
       active,
     } = req.body;
 
@@ -109,6 +120,14 @@ const updateRecordedClass = async (req, res) => {
     if (subject !== undefined) update.subject = subject || null;
     if (recordedDate !== undefined) update.recordedDate = recordedDate;
     if (active !== undefined) update.active = active;
+    if (visibilityWindowDays !== undefined) {
+      // Explicit null = "never expires"; a number = that many days from
+      // recordedDate before it drops out of students' list.
+      update.visibilityWindowDays =
+        visibilityWindowDays === null
+          ? null
+          : Math.max(0, Math.round(Number(visibilityWindowDays)) || 0);
+    }
     if (durationSeconds !== undefined) {
       update.durationSeconds =
         typeof durationSeconds === "number" && durationSeconds > 0

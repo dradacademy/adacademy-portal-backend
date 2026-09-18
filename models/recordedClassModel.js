@@ -64,6 +64,21 @@ const recordedClassSchema = new mongoose.Schema(
       ref: "User",
       default: null,
     },
+    // How many days after recordedDate this recording stays visible/
+    // playable for STUDENTS, computed live on every request (same pattern
+    // as enrollment expiry — no scheduled job). Per-video, admin-editable,
+    // defaults to 7 for every new upload. `null` means "never expires" —
+    // always visible to students as long as `active` stays true. Nothing
+    // here touches YouTube: the admin's video keeps existing there
+    // regardless of this window, until they delete it themselves, on
+    // whatever schedule they choose, in YouTube Studio. The admin's own
+    // Recorded Classes list always shows every video regardless of this
+    // window — it only affects what students see.
+    visibilityWindowDays: {
+      type: Number,
+      default: 7,
+      min: 0,
+    },
     // Soft-delete/retire flag — hides it from students without losing the
     // watch-history/analytics rows that reference it.
     active: {
@@ -76,4 +91,21 @@ const recordedClassSchema = new mongoose.Schema(
 
 recordedClassSchema.index({ category: 1, active: 1 });
 
-module.exports = mongoose.model("RecordedClass", recordedClassSchema);
+// True when this recording should still show up / be playable for a
+// STUDENT right now — i.e. `active` and (no visibility window set, or the
+// window hasn't elapsed since recordedDate yet). Not applied to the
+// admin's own listing/analytics, which always show every video.
+recordedClassSchema.methods.isVisibleToStudents = function () {
+  if (!this.active) return false;
+  if (this.visibilityWindowDays === null || this.visibilityWindowDays === undefined) {
+    return true;
+  }
+  const cutoff =
+    new Date(this.recordedDate).getTime() +
+    this.visibilityWindowDays * 24 * 60 * 60 * 1000;
+  return Date.now() <= cutoff;
+};
+
+const RecordedClass = mongoose.model("RecordedClass", recordedClassSchema);
+
+module.exports = RecordedClass;
