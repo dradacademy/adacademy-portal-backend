@@ -3,7 +3,79 @@ const jwt = require("jsonwebtoken");
 const XLSX = require("xlsx");
 const { Readable } = require("stream");
 const userModel = require("../models/userModel");
+const enrollmentModel = require("../models/enrollmentModel");
 const { EXAM_CATEGORIES } = require("../constants/examCategories");
+
+// Parses the optional "enrollmentValidTill" column from the bulk user-upload
+// sheet into a JS Date, mirroring enrollmentController.js's setEnrollment
+// (same {userId, category} enrollment record, just set up in bulk here
+// instead of one at a time via the "Manage Enrollment" modal). Returns null
+// for a blank/absent cell (meaning "skip — set up enrollment later as
+// usual"); throws a plain, human-readable Error for anything present but
+// unparseable, so the caller can report it per-row without failing the
+// whole upload over one bad date.
+const parseEnrollmentValidTill = (value) => {
+  if (value === undefined || value === null || value === "") return null;
+
+  // Read with cellDates:true below, so a real Excel date cell already
+  // arrives as a JS Date.
+  if (value instanceof Date) {
+    if (isNaN(value.getTime())) throw new Error("Invalid date");
+    return value;
+  }
+
+  // A bare number here means the cell wasn't formatted as a date in Excel
+  // (e.g. left as General) — treat it as an Excel serial date.
+  if (typeof value === "number") {
+    const parsed = XLSX.SSF.parse_date_code(value);
+    if (!parsed) throw new Error("Invalid date");
+    return new Date(Date.UTC(parsed.y, parsed.m - 1, parsed.d));
+  }
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+
+    // Builds the date and confirms it round-trips exactly (guards against
+    // e.g. "31-02-2027" or "32-13-2027" silently overflowing into some
+    // other, wrong date instead of being rejected — Date.UTC doesn't
+    // throw on out-of-range components, it normalizes them).
+    const buildAndVerify = (y, m, d) => {
+      if (m < 1 || m > 12 || d < 1 || d > 31) throw new Error("Invalid date");
+      const date = new Date(Date.UTC(y, m - 1, d));
+      if (
+        isNaN(date.getTime()) ||
+        date.getUTCFullYear() !== y ||
+        date.getUTCMonth() !== m - 1 ||
+        date.getUTCDate() !== d
+      ) {
+        throw new Error("Invalid date");
+      }
+      return date;
+    };
+
+    // DD-MM-YYYY or DD/MM/YYYY — matches the format the admin already sees
+    // in the "Manage Enrollment" modal (e.g. "19-02-2027").
+    let match = trimmed.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
+    if (match) {
+      const [, d, m, y] = match;
+      return buildAndVerify(Number(y), Number(m), Number(d));
+    }
+
+    // YYYY-MM-DD (ISO) — same format the admin's date-picker sends.
+    match = trimmed.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+    if (match) {
+      const [, y, m, d] = match;
+      return buildAndVerify(Number(y), Number(m), Number(d));
+    }
+
+    throw new Error(
+      `Unrecognized date "${trimmed}" — use DD-MM-YYYY (e.g. 19-02-2027) or YYYY-MM-DD`
+    );
+  }
+
+  throw new Error("Invalid date");
+};
 
 const registerUser = async (req, res) => {
   try {
@@ -179,8 +251,10 @@ const bulkCreateUsers = async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
-    // Parse Excel file
-    const workbook = XLSX.read(req.file.buffer, { type: "buffer" });
+    // Parse Excel file. cellDates:true so a real Excel date cell in the
+    // optional enrollmentValidTill column arrives as a JS Date rather than
+    // a bare serial number.
+    const workbook = XLSX.read(req.file.buffer, { type: "buffer", cellDates: true });
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
     const users = XLSX.utils.sheet_to_json(sheet);
 
@@ -234,6 +308,26 @@ const bulkCreateUsers = async (req, res) => {
         role: user.role.toLowerCase().trim(),
         category: user.category ? String(user.category).toLowerCase().trim() : null,
       };
+
+      // Optional: set up (or renew) this student's course enrollment
+      // directly from this same row — same {userId, category} record the
+      // "Manage Enrollment" modal sets, just batched here so the admin
+      // doesn't need a separate pass afterward. Enrolls them in the same
+      // category the row just created them under. Deliberately never
+      // blocks the row: a blank cell just means "no enrollment set from
+      // this upload", and an unparseable one is reported separately after
+      // the account is created rather than failing the whole row over it.
+      sanitizedUser.enrollmentValidTill = null;
+      sanitizedUser.enrollmentDateError = null;
+      if (sanitizedUser.role === "student" && user.enrollmentValidTill !== undefined) {
+        try {
+          sanitizedUser.enrollmentValidTill = parseEnrollmentValidTill(
+            user.enrollmentValidTill
+          );
+        } catch (dateError) {
+          sanitizedUser.enrollmentDateError = dateError.message;
+        }
+      }
 
       // Email format validation
       if (!emailRegex.test(sanitizedUser.email)) {
@@ -363,17 +457,20 @@ const bulkCreateUsers = async (req, res) => {
 
     // Step 4: Bulk insert with error handling (ATOMIC OPERATION)
     let insertedCount = 0;
+    let insertedDocs = [];
     try {
-      const result = await userModel.insertMany(hashedUsers, { 
+      const result = await userModel.insertMany(hashedUsers, {
         ordered: false // Continue on duplicate key errors
       });
       insertedCount = result.length;
+      insertedDocs = result;
     } catch (error) {
       // Handle duplicate key errors that slipped through
       if (error.code === 11000) {
         // Some duplicates were caught by MongoDB
         insertedCount = error.insertedDocs ? error.insertedDocs.length : 0;
-        
+        insertedDocs = error.insertedDocs || [];
+
         // Add duplicate errors
         if (error.writeErrors) {
           error.writeErrors.forEach((err) => {
@@ -390,13 +487,81 @@ const bulkCreateUsers = async (req, res) => {
       }
     }
 
-    // Step 5: Return detailed response
+    // Step 5: Optional per-row enrollment setup, for whichever rows
+    // supplied a usable enrollmentValidTill and were actually inserted.
+    // Batched via bulkWrite (upsert on {userId, category}, same key as
+    // enrollmentController.js's setEnrollment) rather than one write per
+    // row. Never fails the upload over enrollment — the user accounts are
+    // already safely created by this point regardless of what happens here.
+    const enrollmentErrors = [];
+    let enrollmentsCreated = 0;
+
+    if (insertedDocs.length > 0) {
+      const emailToUserId = new Map(
+        insertedDocs.map((doc) => [doc.email, doc._id])
+      );
+
+      const enrollmentOps = [];
+      for (const user of usersToInsert) {
+        if (user.role !== "student") continue;
+        const userId = emailToUserId.get(user.email);
+        if (!userId) continue; // wasn't actually inserted (race-condition duplicate)
+
+        if (user.enrollmentDateError) {
+          enrollmentErrors.push({
+            row: user.rowNumber,
+            email: user.email,
+            reason: `Account created, but enrollment was not set: ${user.enrollmentDateError}`,
+          });
+          continue;
+        }
+
+        if (!user.enrollmentValidTill) continue; // column left blank — nothing to do here
+
+        enrollmentOps.push({
+          updateOne: {
+            filter: { userId, category: user.category },
+            update: {
+              $set: {
+                userId,
+                category: user.category,
+                validTill: user.enrollmentValidTill,
+                revoked: false,
+                grantedBy: req.user._id,
+              },
+              $setOnInsert: { validFrom: new Date() },
+            },
+            upsert: true,
+          },
+        });
+      }
+
+      if (enrollmentOps.length > 0) {
+        try {
+          const bulkResult = await enrollmentModel.bulkWrite(enrollmentOps, {
+            ordered: false,
+          });
+          enrollmentsCreated =
+            (bulkResult.upsertedCount || 0) + (bulkResult.modifiedCount || 0);
+        } catch (enrollmentError) {
+          enrollmentErrors.push({
+            row: null,
+            email: null,
+            reason: `Some enrollments could not be saved: ${enrollmentError.message}`,
+          });
+        }
+      }
+    }
+
+    // Step 6: Return detailed response
     res.status(200).json({
       success: true,
       message: `Successfully inserted ${insertedCount} users`,
       inserted: insertedCount,
       skipped: errors.length,
-      errors: errors.length > 0 ? errors : undefined
+      errors: errors.length > 0 ? errors : undefined,
+      enrollmentsCreated,
+      enrollmentErrors: enrollmentErrors.length > 0 ? enrollmentErrors : undefined,
     });
 
   } catch (error) {
@@ -501,7 +666,15 @@ const logoutUser = async (req, res) => {
 
 const downloadUserTemplate = (req, res) => {
   const worksheetData = [
-    ["registerNumber", "username", "email", "password", "role", "category"],
+    [
+      "registerNumber",
+      "username",
+      "email",
+      "password",
+      "role",
+      "category",
+      "enrollmentValidTill",
+    ],
     [
       "7719801424",
       "JohnDoe",
@@ -509,6 +682,7 @@ const downloadUserTemplate = (req, res) => {
       "123456",
       "student",
       "gate", // one of: gate, tnpsc-ae, tnpsc-jdo, ssc-rrb-je — required for students, leave blank for evaluator/admin rows
+      "19-02-2027", // optional — sets this student's course enrollment (category above) valid till this date, same as the "Manage Enrollment" screen. Format: DD-MM-YYYY. Leave blank to skip and set it up later.
     ],
   ];
 
