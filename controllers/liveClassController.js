@@ -1,7 +1,10 @@
 const liveClassModel = require("../models/liveClassModel");
+const liveAttendanceModel = require("../models/liveAttendanceModel");
 const enrollmentModel = require("../models/enrollmentModel");
+const userModel = require("../models/userModel");
 const { isEnrollmentActive } = require("../models/enrollmentModel");
 const { extractYoutubeVideoId } = require("../utils/youtube");
+const { getAttendanceStatus } = require("../utils/attendanceHelper");
 
 // POST /api/live-classes (admin only) — "Go Live": the admin pastes the
 // YouTube Live watch link for the stream they've already started on
@@ -204,10 +207,146 @@ const joinLiveClass = async (req, res) => {
   }
 };
 
+// POST /api/live-classes/:id/progress (student) — called periodically
+// (~every 15-20s) by LiveClassPlayer while a student is actually watching,
+// plus once on close. Same "actual watch time, not just having the page
+// open" principle as recorded-class progress: this only advances by the
+// number of seconds really played, so a student can't get credit just by
+// leaving the tab open unless the player was actually running.
+const recordLiveProgress = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { deltaSecondsWatched, newSession } = req.body;
+
+    const liveClass = await liveClassModel.findById(id).select("_id");
+    if (!liveClass) {
+      return res.status(404).json({ success: false, message: "Live class not found." });
+    }
+
+    const update = {
+      $set: { lastWatchedAt: new Date() },
+      $inc: {},
+    };
+    if (typeof deltaSecondsWatched === "number" && deltaSecondsWatched > 0) {
+      update.$inc.totalWatchSeconds = deltaSecondsWatched;
+    }
+    if (newSession) {
+      update.$inc.sessionCount = 1;
+    }
+    if (Object.keys(update.$inc).length === 0) delete update.$inc;
+
+    const attendance = await liveAttendanceModel.findOneAndUpdate(
+      { userId: req.user._id, liveClassId: id },
+      update,
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+
+    res.status(200).json({ success: true, data: attendance });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Failed to record live class progress.",
+      error: error.message,
+    });
+  }
+};
+
+// GET /api/live-classes/attendance-report (admin only) — every student's
+// watch time against every live class, with the same Present/Partially
+// Watched/Absent verdict as the recorded-class report (see
+// controllers/attendanceController.js for the combined, exportable view of
+// both). Kept here too as the live-only source of truth this data comes
+// from. Optionally filtered by ?liveClassId= or ?category=.
+const getLiveAttendanceReport = async (req, res) => {
+  try {
+    const { liveClassId, category } = req.query;
+
+    const liveClassFilter = category ? { category } : {};
+    if (liveClassId) liveClassFilter._id = liveClassId;
+
+    const liveClasses = await liveClassModel.find(liveClassFilter).select(
+      "title category startedAt endedAt active"
+    );
+    const liveClassIds = liveClasses.map((lc) => lc._id);
+    const liveClassById = new Map(liveClasses.map((lc) => [lc._id.toString(), lc]));
+
+    const attendanceRows = await liveAttendanceModel
+      .find({ liveClassId: { $in: liveClassIds } })
+      .populate("userId", "username email category")
+      .sort({ lastWatchedAt: -1 });
+
+    const data = attendanceRows
+      .filter((row) => row.userId && liveClassById.has(row.liveClassId.toString()))
+      .map((row) => {
+        const liveClass = liveClassById.get(row.liveClassId.toString());
+        const durationSeconds = liveClass.getElapsedSeconds();
+        const watchPercent = Math.min(
+          100,
+          (row.totalWatchSeconds / durationSeconds) * 100
+        );
+
+        return {
+          studentId: row.userId._id,
+          studentName: row.userId.username,
+          studentEmail: row.userId.email,
+          liveClassId: liveClass._id,
+          liveClassTitle: liveClass.title,
+          startedAt: liveClass.startedAt,
+          liveClassStillActive: liveClass.active,
+          durationSeconds,
+          watchedSeconds: row.totalWatchSeconds,
+          watchPercent: Number(watchPercent.toFixed(1)),
+          attendanceStatus: getAttendanceStatus(watchPercent),
+          lastWatchedAt: row.lastWatchedAt,
+        };
+      });
+
+    res.status(200).json({ success: true, data });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch live attendance report.",
+      error: error.message,
+    });
+  }
+};
+
+// DELETE /api/live-classes/:id (admin only) — permanently removes a live
+// class entry from the history table (e.g. a duplicate/mistaken entry).
+// Also removes its liveAttendanceModel rows so no orphaned watch-time data
+// is left pointing at a deleted class. If the entry being deleted is the
+// one currently live, this has the same effect as "End Live" plus removal
+// from history — students immediately stop seeing it (listCurrentLiveClasses
+// and joinLiveClass both look the document up fresh on every request, so
+// a deleted class simply no longer exists for them, in-app or in history).
+const deleteLiveClass = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const liveClass = await liveClassModel.findByIdAndDelete(id);
+    if (!liveClass) {
+      return res.status(404).json({ success: false, message: "Live class not found." });
+    }
+
+    await liveAttendanceModel.deleteMany({ liveClassId: id });
+
+    res.status(200).json({ success: true, data: { _id: id } });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Failed to delete live class.",
+      error: error.message,
+    });
+  }
+};
+
 module.exports = {
   startLiveClass,
   endLiveClass,
   listLiveClasses,
   listCurrentLiveClasses,
   joinLiveClass,
+  recordLiveProgress,
+  getLiveAttendanceReport,
+  deleteLiveClass,
 };
