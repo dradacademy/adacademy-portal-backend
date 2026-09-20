@@ -74,6 +74,11 @@ const createRecordedClass = async (req, res) => {
 
     res.status(201).json({ success: true, data: recordedClass });
   } catch (error) {
+    // Logged server-side so a create failure (validation, duplicate key,
+    // storage-quota, connection issue, etc.) is actually diagnosable from
+    // Railway logs — the frontend only ever surfaces `.message`, not this
+    // `.error` field, so without this the real reason was invisible.
+    console.error("Failed to save recorded class:", error.name, error.message);
     res.status(500).json({
       success: false,
       message: "Failed to save recorded class.",
@@ -167,6 +172,7 @@ const updateRecordedClass = async (req, res) => {
 
     res.status(200).json({ success: true, data: recordedClass });
   } catch (error) {
+    console.error("Failed to update recorded class:", error.name, error.message);
     res.status(500).json({
       success: false,
       message: "Failed to update recorded class.",
