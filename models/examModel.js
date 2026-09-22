@@ -49,6 +49,18 @@ const examSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    // Exam-level override for NAT-style numeric answers. When true, EVERY
+    // "Fill in the Blanks" question in this exam is treated as numeric
+    // (on-screen keypad instead of a text box, and value-based grading —
+    // see NumericKeypad.jsx / ExamSubmissionHelper.js) regardless of each
+    // question's own `isNumericAnswer` flag. Lets an admin flip the keypad
+    // on for a whole exam at once instead of ticking every question
+    // individually; the per-question flag still works on its own for exams
+    // where only some Fill-in-the-Blanks questions are numeric.
+    allNumericAnswerKeypad: {
+      type: Boolean,
+      default: false,
+    },
     questionSelection: {
       MCQ: {
         startIndex: { type: Number, default: 0 },

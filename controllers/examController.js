@@ -104,6 +104,7 @@ const createExam = async (req, res) => {
       questionSelection,
       questionSets,
       scheduledDate,
+      allNumericAnswerKeypad,
     } = req.body;
 
     if (
@@ -143,6 +144,11 @@ const createExam = async (req, res) => {
           questionText: question.questionText,
           options: question.options,
           correctAnswers: sanitizeCorrectAnswers(question),
+          // Bug fix: this was previously dropped on create — every
+          // freshly-created question silently lost its "Numeric answer
+          // (NAT-style)" checkbox state and fell back to the schema
+          // default (false), regardless of what the admin ticked.
+          isNumericAnswer: !!question.isNumericAnswer,
           image: question.image,
           answerKeyText: question.answerKeyText,
           answerKeyImage: question.answerKeyImage,
@@ -230,6 +236,7 @@ const createExam = async (req, res) => {
             // Test is visible to students the moment it's created active.
             publishedAt: status === "active" ? new Date() : null,
             passPercentage: passPercentage || 90,
+            allNumericAnswerKeypad: !!allNumericAnswerKeypad,
             examCode,
             poolQuestions: createdQuestions.map((q) => q._id), // Full question pool
             questions: activeQuestions, // Active questions only
@@ -368,6 +375,7 @@ const getAllExams = async (req, res) => {
         passPercentage: exam.passPercentage,
         examCode: exam.examCode,
         shuffleQuestion: exam.shuffleQuestion,
+        allNumericAnswerKeypad: exam.allNumericAnswerKeypad,
         scheduledDate: exam.scheduledDate,
         publishedAt: exam.publishedAt,
         createdAt: exam.createdAt,
@@ -392,6 +400,7 @@ const updateExam = async (req, res) => {
       questionSelection,
       examCode,
       scheduledDate,
+      allNumericAnswerKeypad,
     } = req.body;
 
     if (
@@ -474,6 +483,10 @@ const updateExam = async (req, res) => {
                 duration: question.duration ?? null,
                 options: question.options ?? existingQuestion.options,
                 correctAnswers: sanitizeCorrectAnswers(question),
+                // Bug fix: this was previously dropped on update too — even
+                // re-editing an existing question and ticking "Numeric
+                // answer (NAT-style)" never actually saved the change.
+                isNumericAnswer: !!question.isNumericAnswer,
                 image: question.image ?? existingQuestion.image,
                 answerKeyText: question.answerKeyText ?? existingQuestion.answerKeyText,
                 answerKeyImage: question.answerKeyImage ?? existingQuestion.answerKeyImage,
@@ -496,6 +509,7 @@ const updateExam = async (req, res) => {
                 questionText: question.questionText,
                 options: question.options,
                 correctAnswers: sanitizeCorrectAnswers(question),
+                isNumericAnswer: !!question.isNumericAnswer,
                 image: question.image,
                 answerKeyText: question.answerKeyText,
                 answerKeyImage: question.answerKeyImage,
@@ -588,6 +602,10 @@ const updateExam = async (req, res) => {
               scheduledDate !== undefined ? scheduledDate || null : exam.scheduledDate,
             ...publishedAtUpdate,
             passPercentage: passPercentage || exam.passPercentage || 90,
+            allNumericAnswerKeypad:
+              allNumericAnswerKeypad !== undefined
+                ? !!allNumericAnswerKeypad
+                : exam.allNumericAnswerKeypad,
             ...(examCode ? { examCode } : {}),
             poolQuestions: updatedQuestionIds,
             questions: nextActiveQuestions,
@@ -739,6 +757,7 @@ const getExamById = async (req, res) => {
         examCode: exam.examCode,
         passPercentage: exam.passPercentage,
         shuffleQuestion: exam.shuffleQuestion,
+        allNumericAnswerKeypad: exam.allNumericAnswerKeypad,
       };
     };
 

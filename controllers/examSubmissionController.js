@@ -557,6 +557,20 @@ const submitExam = async (req, res) => {
       }
 
       // 5. Create question lookup map ONCE (O(n) instead of O(n²))
+      // When the exam has `allNumericAnswerKeypad` set, every "Fill in the
+      // Blanks" question in it grades (and was shown to the student) as
+      // NAT-style, regardless of that question's own isNumericAnswer flag
+      // — mirror that override here so evaluateQuestion/calculateMarks
+      // (which only look at question.isNumericAnswer) grade consistently
+      // with what the student actually saw on screen.
+      if (examDetails.allNumericAnswerKeypad) {
+        examDetails.questions.forEach((q) => {
+          if (q.questionType === "Fill in the Blanks") {
+            q.isNumericAnswer = true;
+          }
+        });
+      }
+
       const questionMap = new Map(
         examDetails.questions.map((q) => [q._id.toString(), q])
       );
