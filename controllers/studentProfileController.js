@@ -711,7 +711,7 @@ const generateProfilePdf = async (req, res) => {
       ensureSpace(h);
       doc.font("Helvetica-Bold").fontSize(9).fillColor(TEXT_COLOR).text(`${idx + 1}.`, doc.page.margins.left, doc.y, {
         continued: true,
-        width: 14,
+        width: contentWidth - 16,
       });
       doc.font("Helvetica").text(` ${rule.pre}`, { continued: !!(rule.bold || rule.post) });
       if (rule.bold) {
