@@ -1,4 +1,27 @@
-const getAnswerStatus = ({ questionType, correctAnswers, studentAnswer }) => {
+// Shared by getAnswerStatus/calculateMarks for a "Fill in the Blanks"
+// question flagged isNumericAnswer (the GATE-style Numerical Answer Type
+// keypad — see NumericKeypad.jsx). Compares by VALUE rather than by exact
+// string, so "2.3", "2.30", and "2.300" all match a stored correct answer
+// of "2.3" — an exact-string comparison (the non-numeric path below) would
+// wrongly mark those Incorrect just for formatting/trailing-zero
+// differences. A small epsilon absorbs floating-point rounding, not
+// intended as an answer-tolerance/range feature.
+const NUMERIC_MATCH_EPSILON = 1e-9;
+const isNumericMatch = (correctAnswers, studentAnswer) => {
+  const studentNum = parseFloat(studentAnswer);
+  if (Number.isNaN(studentNum)) return false;
+  return correctAnswers.some((ans) => {
+    const ansNum = parseFloat(ans);
+    return !Number.isNaN(ansNum) && Math.abs(ansNum - studentNum) < NUMERIC_MATCH_EPSILON;
+  });
+};
+
+const getAnswerStatus = ({
+  questionType,
+  correctAnswers,
+  studentAnswer,
+  isNumericAnswer,
+}) => {
   if (
     !studentAnswer ||
     (Array.isArray(studentAnswer) && studentAnswer.length === 0)
@@ -19,9 +42,11 @@ const getAnswerStatus = ({ questionType, correctAnswers, studentAnswer }) => {
     }
 
     case "Fill in the Blanks": {
-      const isCorrect = correctAnswers.some(
-        (ans) => normalizeNoSpace(ans) === normalizeNoSpace(studentAnswer),
-      );
+      const isCorrect = isNumericAnswer
+        ? isNumericMatch(correctAnswers, studentAnswer)
+        : correctAnswers.some(
+            (ans) => normalizeNoSpace(ans) === normalizeNoSpace(studentAnswer),
+          );
 
       return isCorrect ? "Correct" : "Incorrect";
     }
@@ -62,6 +87,7 @@ const evaluateQuestion = (question, studQuestion) => {
         questionType: question.questionType,
         correctAnswers: question.correctAnswers,
         studentAnswer: studQuestion.studentAnswer,
+        isNumericAnswer: question.isNumericAnswer,
       })
     : "Skipped";
 
@@ -73,7 +99,7 @@ const evaluateQuestion = (question, studQuestion) => {
 };
 
 const calculateMarks = (question, studQuestion, positiveMark, negativeMark) => {
-  const { questionType, correctAnswers } = question;
+  const { questionType, correctAnswers, isNumericAnswer } = question;
   const studentAnswer = studQuestion.studentAnswer;
 
   if (
@@ -96,9 +122,11 @@ const calculateMarks = (question, studQuestion, positiveMark, negativeMark) => {
     case "Fill in the Blanks": {
       const normalizeNoSpace = (str) => str.toLowerCase().replace(/\s+/g, "");
 
-      const isCorrect = correctAnswers.some(
-        (ans) => normalizeNoSpace(ans) === normalizeNoSpace(studentAnswer),
-      );
+      const isCorrect = isNumericAnswer
+        ? isNumericMatch(correctAnswers, studentAnswer)
+        : correctAnswers.some(
+            (ans) => normalizeNoSpace(ans) === normalizeNoSpace(studentAnswer),
+          );
       return isCorrect ? positiveMark : 0;
     }
 

@@ -33,6 +33,16 @@ const QuestionSchema = new mongoose.Schema(
       type: [String],
       required: true,
     },
+    // Only meaningful for questionType "Fill in the Blanks" — flips the
+    // student-facing input from a plain text box to the on-screen numeric
+    // keypad (digits, ., -, backspace, clear) used for GATE-style Numerical
+    // Answer Type (NAT) questions, and switches grading to compare the
+    // answer as a NUMBER instead of an exact string (see
+    // ExamSubmissionHelper.js) so "2.3" and "2.30" are treated the same.
+    isNumericAnswer: {
+      type: Boolean,
+      default: false,
+    },
     // Optional per-question overrides. When null, grading/duration logic
     // falls back to the global level-based Mark/Duration config for this
     // question's `level`. This is what lets an admin customize marks,
