@@ -10,6 +10,10 @@ const BRAND_COLOR = "#0f2a4a";
 const BRAND_TINT = "#e8edf3";
 const TEXT_COLOR = "#1f2933";
 const MUTED_COLOR = "#6b7280";
+const GOLD_ACCENT = "#c9a227";
+const LIGHT_BORDER = "#d9dee5";
+const STATUS_GREEN = "#166534";
+const STATUS_AMBER = "#b45309";
 
 const formatPdfDate = (value) => {
   if (!value) return "—";
@@ -297,6 +301,12 @@ const getProfileAdmin = async (req, res) => {
 // cached, so this works identically for a profile submitted years ago and
 // one submitted a minute ago — there's no separate "PDF export" data path
 // to keep in sync with the form.
+//
+// Layout mirrors the academy's printed intake form: a navy/gold header band
+// with a passport-photo box, a shaded banner + bordered two-column grid per
+// section, a proper academic-records table, and a full rules/declaration
+// section with typed-signature blocks — see the design review this was
+// built against (student: Sakthivel G, 2026-09-22) for the reference look.
 const generateProfilePdf = async (req, res) => {
   try {
     const { userId } = req.params;
@@ -309,9 +319,13 @@ const generateProfilePdf = async (req, res) => {
 
     const profile = await studentProfileModel.findOne({ userId });
 
+    const HEADER_H = 140;
+    const PHOTO_W = 99; // ~35mm
+    const PHOTO_H = 127; // ~45mm
+
     const doc = new PDFDocument({
       size: "A4",
-      margins: { top: 90, bottom: 48, left: 48, right: 48 },
+      margins: { top: HEADER_H + 18, bottom: 46, left: 40, right: 40 },
       bufferPages: true,
     });
 
@@ -322,28 +336,76 @@ const generateProfilePdf = async (req, res) => {
 
     const contentWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
     const bottomLimit = doc.page.height - doc.page.margins.bottom;
+    const PHOTO_X = doc.page.width - doc.page.margins.right - PHOTO_W;
+    const PHOTO_Y = 7;
 
-    // Full-width navy header band with the academy name — drawn on every
-    // page (addPage below re-invokes this), so a printed page is always
-    // identifiable even if pages get separated.
+    const categoryLabel = EXAM_CATEGORY_LABELS[student.category] || student.category || "—";
+
+    // Full-width navy header band, redrawn on every page (addPage below
+    // re-invokes this) so a printed page is always identifiable on its own
+    // — but the photo box outline/image is only placed once, on page 1.
+    let headerDrawCount = 0;
     const drawHeaderBand = () => {
-      doc.rect(0, 0, doc.page.width, 64).fill(BRAND_COLOR);
+      headerDrawCount += 1;
+      doc.rect(0, 0, doc.page.width, HEADER_H).fill(BRAND_COLOR);
+      doc.rect(0, HEADER_H - 3, doc.page.width, 3).fill(GOLD_ACCENT);
       doc
         .fillColor("#ffffff")
         .font("Helvetica-Bold")
-        .fontSize(15)
-        .text("Dr. A.D. Academy of Excellence", doc.page.margins.left, 18, { width: contentWidth });
+        .fontSize(18)
+        .text("Dr. A.D. Academy of Excellence", doc.page.margins.left, 22, { width: contentWidth - PHOTO_W - 14 });
       doc
         .font("Helvetica")
-        .fontSize(10)
-        .fillColor("#cbd5e1")
-        .text("Student Profile", doc.page.margins.left, 40, { width: contentWidth });
+        .fontSize(11)
+        .fillColor("#cfe0f2")
+        .text("Student Enrollment & Profile Form", doc.page.margins.left, 47, { width: contentWidth - PHOTO_W - 14 });
+      doc
+        .font("Helvetica")
+        .fontSize(8.5)
+        .fillColor("#9db6d1")
+        .text(`Register No: ${orDash(student.registerNumber)}   ·   ${categoryLabel}`, doc.page.margins.left, 66, {
+          width: contentWidth - PHOTO_W - 14,
+        });
+
+      if (headerDrawCount === 1) {
+        doc.rect(PHOTO_X, PHOTO_Y, PHOTO_W, PHOTO_H).lineWidth(1.5).stroke(GOLD_ACCENT);
+      }
+
       doc.fillColor(TEXT_COLOR).font("Helvetica");
-      doc.y = 82;
+      doc.y = HEADER_H + 16;
     };
 
     doc.on("pageAdded", drawHeaderBand);
     drawHeaderBand();
+
+    // Passport photo — placed into the header's photo box once, right after
+    // the first header draw. Missing/corrupt GridFS entries are swallowed
+    // here so a bad photo never fails the whole PDF; no photo on file just
+    // leaves the gold-bordered box with a plain placeholder label.
+    if (profile?.photoGridFsFileId) {
+      try {
+        const photoBuffer = await getFileBuffer(profile.photoGridFsFileId);
+        doc.image(photoBuffer, PHOTO_X + 2, PHOTO_Y + 2, {
+          width: PHOTO_W - 4,
+          height: PHOTO_H - 4,
+          fit: [PHOTO_W - 4, PHOTO_H - 4],
+          align: "center",
+          valign: "center",
+        });
+      } catch (photoError) {
+        console.error("Profile PDF: failed to load photo, continuing without it:", photoError.message);
+      }
+    } else {
+      doc
+        .font("Helvetica")
+        .fontSize(7)
+        .fillColor("#ffffff")
+        .text("Passport Size\nPhoto\n(35mm × 45mm)", PHOTO_X + 4, PHOTO_Y + PHOTO_H / 2 - 14, {
+          width: PHOTO_W - 8,
+          align: "center",
+        });
+      doc.fillColor(TEXT_COLOR);
+    }
 
     const ensureSpace = (needed) => {
       if (doc.y + needed > bottomLimit) {
@@ -351,113 +413,232 @@ const generateProfilePdf = async (req, res) => {
       }
     };
 
-    const drawSectionHeader = (title) => {
-      ensureSpace(34);
+    // Section banner. `solid` gives the special navy-fill treatment used
+    // once, for the Enrollment & Course Details banner at the top — every
+    // other section uses the lighter tint-on-navy-text style.
+    const drawSectionHeader = (title, opts = {}) => {
+      ensureSpace(30);
       const y = doc.y;
-      doc.rect(doc.page.margins.left, y, contentWidth, 20).fill(BRAND_TINT);
-      doc
-        .fillColor(BRAND_COLOR)
-        .font("Helvetica-Bold")
-        .fontSize(10.5)
-        .text(title, doc.page.margins.left + 8, y + 5, { width: contentWidth - 16 });
-      doc.y = y + 20 + 8;
+      const h = 22;
+      if (opts.solid) {
+        doc.rect(doc.page.margins.left, y, contentWidth, h).fill(BRAND_COLOR);
+        doc.rect(doc.page.margins.left, y, 4, h).fill(GOLD_ACCENT);
+        doc
+          .fillColor("#ffffff")
+          .font("Helvetica-Bold")
+          .fontSize(10.5)
+          .text(title, doc.page.margins.left + 12, y + 6, { width: contentWidth - 20 });
+      } else {
+        doc.rect(doc.page.margins.left, y, contentWidth, h).fill(BRAND_TINT);
+        doc.rect(doc.page.margins.left, y, 4, h).fill(BRAND_COLOR);
+        doc
+          .fillColor(BRAND_COLOR)
+          .font("Helvetica-Bold")
+          .fontSize(10.5)
+          .text(title, doc.page.margins.left + 12, y + 6, { width: contentWidth - 20 });
+      }
+      doc.y = y + h + 8;
       doc.fillColor(TEXT_COLOR).font("Helvetica");
     };
 
-    const writeField = (label, value) => {
-      ensureSpace(16);
+    // Bordered, two-column key/value grid — the main building block for
+    // every section below the header. `fields` is [{label, value, full?}];
+    // consecutive non-`full` fields are paired left/right, a `full` field
+    // (e.g. a long address) gets its own full-width row. Row heights are
+    // measured up front so long values wrap cleanly without overlap, and
+    // the whole grid tries to stay together on one page.
+    const drawKvGrid = (fields) => {
+      const colGap = 14;
+      const labelWidth = 108;
+      const rowPadY = 5;
+      const halfWidth = (contentWidth - colGap) / 2;
+
+      doc.font("Helvetica").fontSize(9);
+
+      const rows = [];
+      let pending = null;
+      fields.forEach((f) => {
+        if (f.full) {
+          if (pending) {
+            rows.push([pending]);
+            pending = null;
+          }
+          rows.push([f]);
+        } else if (!pending) {
+          pending = f;
+        } else {
+          rows.push([pending, f]);
+          pending = null;
+        }
+      });
+      if (pending) rows.push([pending]);
+
+      const measured = rows.map((row) => {
+        if (row.length === 1) {
+          const valueWidth = contentWidth - labelWidth - 24;
+          const h = doc.heightOfString(orDash(row[0].value), { width: valueWidth });
+          return { row, height: Math.max(16, h + rowPadY * 2) };
+        }
+        const valueWidth = halfWidth - labelWidth - 14;
+        const h1 = doc.heightOfString(orDash(row[0].value), { width: valueWidth });
+        const h2 = row[1] ? doc.heightOfString(orDash(row[1].value), { width: valueWidth }) : 0;
+        return { row, height: Math.max(16, Math.max(h1, h2) + rowPadY * 2) };
+      });
+
+      const totalHeight = measured.reduce((sum, r) => sum + r.height, 0);
+      ensureSpace(totalHeight + 4);
+
+      const gridTop = doc.y;
+      const gridLeft = doc.page.margins.left;
+      doc.rect(gridLeft, gridTop, contentWidth, totalHeight).lineWidth(0.75).stroke(LIGHT_BORDER);
+
+      let rowY = gridTop;
+      measured.forEach((m, idx) => {
+        const { row, height } = m;
+        if (row.length === 1) {
+          const f = row[0];
+          doc
+            .font("Helvetica-Bold")
+            .fontSize(9)
+            .fillColor(MUTED_COLOR)
+            .text(f.label, gridLeft + 8, rowY + rowPadY, { width: labelWidth });
+          doc
+            .font("Helvetica")
+            .fontSize(9)
+            .fillColor(TEXT_COLOR)
+            .text(orDash(f.value), gridLeft + 8 + labelWidth + 6, rowY + rowPadY, {
+              width: contentWidth - labelWidth - 30,
+            });
+        } else {
+          const [f1, f2] = row;
+          doc
+            .font("Helvetica-Bold")
+            .fontSize(9)
+            .fillColor(MUTED_COLOR)
+            .text(f1.label, gridLeft + 8, rowY + rowPadY, { width: labelWidth });
+          doc
+            .font("Helvetica")
+            .fontSize(9)
+            .fillColor(TEXT_COLOR)
+            .text(orDash(f1.value), gridLeft + 8 + labelWidth + 6, rowY + rowPadY, {
+              width: halfWidth - labelWidth - 14,
+            });
+          if (f2) {
+            const col2X = gridLeft + halfWidth + colGap;
+            doc
+              .font("Helvetica-Bold")
+              .fontSize(9)
+              .fillColor(MUTED_COLOR)
+              .text(f2.label, col2X, rowY + rowPadY, { width: labelWidth });
+            doc
+              .font("Helvetica")
+              .fontSize(9)
+              .fillColor(TEXT_COLOR)
+              .text(orDash(f2.value), col2X + labelWidth + 6, rowY + rowPadY, {
+                width: halfWidth - labelWidth - 14,
+              });
+          }
+        }
+        if (idx < measured.length - 1) {
+          doc
+            .moveTo(gridLeft, rowY + height)
+            .lineTo(gridLeft + contentWidth, rowY + height)
+            .lineWidth(0.5)
+            .strokeColor(LIGHT_BORDER)
+            .stroke();
+        }
+        rowY += height;
+      });
+
+      doc.y = gridTop + totalHeight + 10;
+      doc.fillColor(TEXT_COLOR).font("Helvetica");
+    };
+
+    // --- Incomplete-profile notice (kept above Enrollment, same as before) ---
+    if (!profile) {
+      ensureSpace(20);
       doc
         .fontSize(9.5)
         .font("Helvetica-Bold")
-        .fillColor(MUTED_COLOR)
-        .text(`${label}:  `, doc.page.margins.left, doc.y, { continued: true, width: contentWidth })
-        .font("Helvetica")
-        .fillColor(TEXT_COLOR)
-        .text(orDash(value));
-      doc.moveDown(0.3);
-    };
-
-    // --- Student header strip ---
-    if (!profile) {
-      doc
-        .fontSize(10)
-        .fillColor("#b45309")
-        .text(
-          "This student has not started their profile yet — the fields below are blank.",
-          { width: contentWidth }
-        );
-      doc.moveDown(0.5);
-      doc.fillColor(TEXT_COLOR);
+        .fillColor(STATUS_AMBER)
+        .text("This student has not started their profile yet — the fields below are blank.", { width: contentWidth });
+      doc.moveDown(0.6);
+      doc.fillColor(TEXT_COLOR).font("Helvetica");
     }
 
-    writeField("Register Number", student.registerNumber);
-    writeField("Category", EXAM_CATEGORY_LABELS[student.category] || student.category);
-    writeField("Roll Number", profile?.rollNumber);
-    writeField("Batch / Course", profile?.batchCourse);
-    writeField("Target Exam", profile?.targetExam);
-    writeField("Date of Joining", formatPdfDate(profile?.dateOfJoining));
-    writeField("Batch Mode / Timing", [profile?.batchMode, profile?.batchTiming].filter(Boolean).join(" / "));
-    doc.moveDown(0.4);
-
-    // Passport photo — own row, top-right, drawn independently of the text
-    // flow below so it never overlaps a field row. Missing/corrupt GridFS
-    // entries are swallowed here so a bad photo never fails the whole PDF.
-    if (profile?.photoGridFsFileId) {
-      try {
-        const photoBuffer = await getFileBuffer(profile.photoGridFsFileId);
-        const photoWidth = 78;
-        const photoHeight = 94;
-        const photoX = doc.page.width - doc.page.margins.right - photoWidth;
-        const photoY = doc.y;
-        doc.save();
-        doc.rect(photoX - 2, photoY - 2, photoWidth + 4, photoHeight + 4).lineWidth(1).stroke(MUTED_COLOR);
-        doc.image(photoBuffer, photoX, photoY, { width: photoWidth, height: photoHeight, fit: [photoWidth, photoHeight] });
-        doc.restore();
-      } catch (photoError) {
-        console.error("Profile PDF: failed to load photo, continuing without it:", photoError.message);
-      }
-    }
+    // --- Enrollment & Course Details ---
+    drawSectionHeader("Enrollment & Course Details", { solid: true });
+    drawKvGrid([
+      { label: "Register Number", value: student.registerNumber },
+      { label: "Roll Number", value: profile?.rollNumber },
+      { label: "Category", value: categoryLabel },
+      { label: "Target Exam", value: profile?.targetExam },
+      { label: "Date of Joining", value: formatPdfDate(profile?.dateOfJoining) },
+      {
+        label: "Batch Mode / Timing",
+        value: [profile?.batchMode, profile?.batchTiming].filter(Boolean).join(" / ") || null,
+      },
+      { label: "Batch / Course", value: profile?.batchCourse },
+    ]);
 
     // --- 1. Personal Details ---
-    drawSectionHeader("1. Student Personal Details");
-    writeField("Full Name", profile?.fullName);
-    writeField("Gender", profile?.gender);
-    writeField("Date of Birth", formatPdfDate(profile?.dateOfBirth));
-    writeField("Aadhaar No.", profile?.aadhaarNo);
-    writeField("Blood Group", profile?.bloodGroup);
-    writeField("Primary Mobile", profile?.primaryMobile);
-    writeField("WhatsApp No.", profile?.whatsappNo);
-    writeField("Personal Email", profile?.personalEmail || student.email);
-    writeField("Student Type", profile?.studentType === "day_scholar" ? "Day Scholar" : profile?.studentType === "hosteller_pg" ? "Hosteller / PG" : profile?.studentType);
+    drawSectionHeader("1.  Student Personal Details");
+    drawKvGrid([
+      { label: "Full Name", value: profile?.fullName },
+      { label: "Gender", value: profile?.gender },
+      { label: "Date of Birth", value: formatPdfDate(profile?.dateOfBirth) },
+      { label: "Blood Group", value: profile?.bloodGroup },
+      { label: "Primary Mobile", value: profile?.primaryMobile },
+      { label: "WhatsApp No.", value: profile?.whatsappNo },
+      { label: "Personal Email", value: profile?.personalEmail || student.email },
+      {
+        label: "Student Type",
+        value:
+          profile?.studentType === "day_scholar"
+            ? "Day Scholar"
+            : profile?.studentType === "hosteller_pg"
+            ? "Hosteller / PG"
+            : profile?.studentType,
+      },
+      { label: "Aadhaar No.", value: profile?.aadhaarNo, full: true },
+    ]);
 
     // --- 2. Parent / Guardian Details ---
-    drawSectionHeader("2. Parent / Permanent Guardian Details");
-    writeField("Father's Name", profile?.fatherName);
-    writeField("Father's Occupation", profile?.fatherOccupation);
-    writeField("Mother's Name", profile?.motherName);
-    writeField("Mother's Occupation", profile?.motherOccupation);
-    writeField("Father's Contact No.", profile?.fatherContactNo);
-    writeField("Mother's Contact No.", profile?.motherContactNo);
-    writeField("Parent WhatsApp No.", profile?.parentWhatsappNo);
-    writeField("Parent Email ID", profile?.parentEmailId);
-    writeField("Permanent Home Address", profile?.permanentHomeAddress);
-    writeField("District / State", profile?.districtState);
-    writeField("PIN Code", profile?.pinCode);
+    drawSectionHeader("2.  Parent / Guardian Details");
+    drawKvGrid([
+      { label: "Father's Name", value: profile?.fatherName },
+      { label: "Father's Occupation", value: profile?.fatherOccupation },
+      { label: "Mother's Name", value: profile?.motherName },
+      { label: "Mother's Occupation", value: profile?.motherOccupation },
+      { label: "Father's Contact No.", value: profile?.fatherContactNo },
+      { label: "Mother's Contact No.", value: profile?.motherContactNo },
+      { label: "Parent WhatsApp No.", value: profile?.parentWhatsappNo },
+      { label: "Parent Email ID", value: profile?.parentEmailId },
+      { label: "Permanent Home Address", value: profile?.permanentHomeAddress, full: true },
+      {
+        label: "District / State / PIN",
+        value: [profile?.districtState, profile?.pinCode].filter(Boolean).join(" – ") || null,
+        full: true,
+      },
+    ]);
 
-    // --- 3. Emergency Contact & Local Accommodation ---
-    drawSectionHeader("3. Emergency Contact & Local Accommodation Details");
-    writeField("Emergency Contact Person", profile?.emergencyContactPerson);
-    writeField("Relationship", profile?.emergencyRelationship);
-    writeField("Emergency Mobile No.", profile?.emergencyMobileNo);
-    writeField("Alternative Phone No.", profile?.alternativePhoneNo);
-    writeField("Hostel / PG Rental Address", profile?.hostelPgRentalAddress);
-    writeField("Local Guardian / Roommate Name", profile?.localGuardianRoommateName);
-    writeField("Guardian / PG Contact No.", profile?.guardianPgContactNo);
+    // --- 3. Emergency Contact & Accommodation ---
+    drawSectionHeader("3.  Emergency Contact & Accommodation Details");
+    drawKvGrid([
+      { label: "Emergency Contact Person", value: profile?.emergencyContactPerson },
+      { label: "Relationship", value: profile?.emergencyRelationship },
+      { label: "Emergency Mobile No.", value: profile?.emergencyMobileNo },
+      { label: "Alternative Phone No.", value: profile?.alternativePhoneNo },
+      { label: "Hostel / PG Address", value: profile?.hostelPgRentalAddress },
+      { label: "Local Guardian / Roommate", value: profile?.localGuardianRoommateName },
+      { label: "Guardian / PG Contact No.", value: profile?.guardianPgContactNo, full: true },
+    ]);
 
     // --- 4. Academic Background & Qualifications (table) ---
-    drawSectionHeader("4. Academic Background & Qualifications");
+    drawSectionHeader("4.  Academic Background & Qualifications");
     const records = profile?.academicRecords || [];
     if (records.length === 0) {
+      ensureSpace(20);
       doc.fontSize(9.5).fillColor(MUTED_COLOR).text("No academic records provided.", { width: contentWidth });
       doc.fillColor(TEXT_COLOR);
       doc.moveDown(0.5);
@@ -499,26 +680,114 @@ const generateProfilePdf = async (req, res) => {
         });
         doc.y = y + rowHeight;
       });
-      doc.moveDown(0.5);
+      doc.moveDown(0.6);
     }
 
-    // --- Declaration & Undertaking ---
-    drawSectionHeader("Joint Declaration & Undertaking");
-    ensureSpace(60);
+    // --- 5. Academy Rules, Code of Conduct & Joint Declaration ---
+    drawSectionHeader("5.  Academy Rules, Code of Conduct & Joint Declaration");
+
+    const rules = [
+      { pre: "A minimum of ", bold: "85% attendance", post: " is required for all scheduled classes and test series." },
+      { pre: "Strict adherence to classroom discipline, batch timings, and digital portal guidelines is mandatory.", bold: "", post: "" },
+      {
+        pre: "Academy proprietary study materials, test booklets, and video lectures are strictly for ",
+        bold: "personal use only",
+        post: " and are non-transferable.",
+      },
+      { pre: "", bold: "Fee policy: ", post: "Fees paid are non-refundable and non-transferable under any circumstances." },
+      { pre: "", bold: "Code of conduct: ", post: "Any misconduct will lead to immediate cancellation of admission." },
+    ];
+
+    rules.forEach((rule, idx) => {
+      const fullText = `${rule.pre}${rule.bold}${rule.post}`;
+      doc.font("Helvetica").fontSize(9);
+      const h = doc.heightOfString(fullText, { width: contentWidth - 16 }) + 4;
+      ensureSpace(h);
+      doc.font("Helvetica-Bold").fontSize(9).fillColor(TEXT_COLOR).text(`${idx + 1}.`, doc.page.margins.left, doc.y, {
+        continued: true,
+        width: 14,
+      });
+      doc.font("Helvetica").text(` ${rule.pre}`, { continued: !!(rule.bold || rule.post) });
+      if (rule.bold) {
+        doc.font("Helvetica-Bold").text(rule.bold, { continued: !!rule.post });
+      }
+      if (rule.post) {
+        doc.font("Helvetica").text(rule.post);
+      }
+      doc.moveDown(0.35);
+      doc.font("Helvetica").fillColor(TEXT_COLOR);
+    });
+    doc.moveDown(0.2);
+
+    // Declaration paragraph, in a shaded bordered box.
+    const declText =
+      "I/We, the undersigned student and parent/guardian, have read and understood the above rules and code of conduct of Dr. A.D. Academy of Excellence, and hereby agree to abide by them in full for the entire duration of the course. This declaration was recorded as a typed digital signature at the time of profile submission.";
+    const declWidth = contentWidth - 24;
+    doc.font("Helvetica").fontSize(8.5);
+    const declHeight = doc.heightOfString(declText, { width: declWidth }) + 18;
+    ensureSpace(declHeight + 8);
+    const declY = doc.y;
     doc
-      .fontSize(9)
-      .fillColor(MUTED_COLOR)
-      .text(
-        "The student and parent/guardian each declared agreement to the academy's Rules & Code of Conduct via a typed digital signature.",
-        { width: contentWidth }
-      );
-    doc.moveDown(0.5);
+      .rect(doc.page.margins.left, declY, contentWidth, declHeight)
+      .lineWidth(0.75)
+      .fillAndStroke("#f9fafb", LIGHT_BORDER);
+    doc
+      .font("Helvetica")
+      .fontSize(8.5)
+      .fillColor("#374151")
+      .text(declText, doc.page.margins.left + 12, declY + 9, { width: declWidth });
+    doc.y = declY + declHeight + 10;
     doc.fillColor(TEXT_COLOR);
-    writeField("Student Signature (typed name)", profile?.studentSignatureName);
-    writeField("Student Agreed", profile?.studentAgreed ? `Yes — ${formatPdfDate(profile?.studentSignedAt)}` : "Not yet agreed");
-    writeField("Parent/Guardian Signature (typed name)", profile?.parentSignatureName);
-    writeField("Parent/Guardian Agreed", profile?.parentAgreed ? `Yes — ${formatPdfDate(profile?.parentSignedAt)}` : "Not yet agreed");
-    writeField("Profile Status", profile?.status === "submitted" ? "Submitted (complete)" : "Draft (incomplete)");
+
+    // Profile status line.
+    ensureSpace(18);
+    const submitted = profile?.status === "submitted";
+    doc.font("Helvetica-Bold").fontSize(9).fillColor(TEXT_COLOR).text("Profile Status:  ", doc.page.margins.left, doc.y, {
+      continued: true,
+    });
+    doc
+      .fillColor(submitted ? STATUS_GREEN : STATUS_AMBER)
+      .text(submitted ? "Submitted — Complete" : "Draft — Incomplete", { continued: true });
+    doc
+      .font("Helvetica")
+      .fillColor(MUTED_COLOR)
+      .text(submitted && profile?.studentSignedAt ? `   (Digitally agreed on ${formatPdfDate(profile.studentSignedAt)})` : "");
+    doc.moveDown(1.1);
+    doc.fillColor(TEXT_COLOR);
+
+    // Signature blocks, side by side.
+    ensureSpace(60);
+    const sigY = doc.y;
+    const sigColWidth = (contentWidth - 24) / 2;
+    const drawSigBlock = (x, name, role, dateLabel) => {
+      doc
+        .font("Helvetica-Oblique")
+        .fontSize(15)
+        .fillColor(BRAND_COLOR)
+        .text(orDash(name), x, sigY, { width: sigColWidth });
+      const lineY = sigY + 24;
+      doc.moveTo(x, lineY).lineTo(x + sigColWidth - 10, lineY).lineWidth(0.75).strokeColor(TEXT_COLOR).stroke();
+      doc
+        .font("Helvetica-Bold")
+        .fontSize(8.4)
+        .fillColor(TEXT_COLOR)
+        .text(role, x, lineY + 5, { continued: true, width: sigColWidth });
+      doc.font("Helvetica").fillColor(MUTED_COLOR).text(`   ·   Date: ${dateLabel}`);
+    };
+    drawSigBlock(
+      doc.page.margins.left,
+      profile?.studentSignatureName,
+      "Student Signature",
+      profile?.studentSignedAt ? formatPdfDate(profile.studentSignedAt) : "—"
+    );
+    drawSigBlock(
+      doc.page.margins.left + sigColWidth + 24,
+      profile?.parentSignatureName,
+      "Parent / Guardian Signature",
+      profile?.parentSignedAt ? formatPdfDate(profile.parentSignedAt) : "—"
+    );
+    doc.y = sigY + 48;
+    doc.fillColor(TEXT_COLOR).font("Helvetica");
 
     // Footer with generation timestamp + page numbers on every page.
     const pageRange = doc.bufferedPageRange();
@@ -528,9 +797,9 @@ const generateProfilePdf = async (req, res) => {
         .fontSize(7.5)
         .fillColor(MUTED_COLOR)
         .text(
-          `Generated ${formatPdfDate(new Date())} · Dr. A.D. Academy of Excellence · Page ${i + 1} of ${pageRange.count}`,
+          `Dr. A.D. Academy of Excellence  ·  Generated ${formatPdfDate(new Date())}  ·  Page ${i + 1} of ${pageRange.count}  ·  This document is system-generated and confidential.`,
           doc.page.margins.left,
-          doc.page.height - 30,
+          doc.page.height - 28,
           { width: contentWidth, align: "center" }
         );
     }
