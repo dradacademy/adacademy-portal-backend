@@ -635,6 +635,12 @@ const generateProfilePdf = async (req, res) => {
     ]);
 
     // --- 4. Academic Background & Qualifications (table) ---
+    // Forced page break here (not just an overflow-triggered one) so every
+    // profile — long or short — lands Academic Records / Rules & Declaration
+    // / Signatures on their own page, matching the printed form's fixed
+    // page-1 / page-2 layout instead of letting them float wherever section
+    // 1–3 happened to end.
+    doc.addPage();
     drawSectionHeader("4.  Academic Background & Qualifications");
     const records = profile?.academicRecords || [];
     if (records.length === 0) {
