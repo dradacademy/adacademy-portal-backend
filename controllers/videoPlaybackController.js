@@ -66,6 +66,10 @@ const listAvailableVideos = async (req, res) => {
         // Lets the frontend show a clear "enrollment expired" state instead
         // of a generic error when the student taps play.
         enrollmentActive,
+        // Lets the frontend show a "Test Series Only" locked state instead
+        // of a generic error for a student whose plan doesn't include
+        // recordings — see the matching check in getPlaybackToken below.
+        accessLevel: enrollment?.accessLevel || "full",
       };
     });
 
@@ -131,6 +135,19 @@ const getPlaybackToken = async (req, res) => {
         success: false,
         message:
           "Your enrollment for this course has expired or is not active. Contact the academy to renew access.",
+      });
+    }
+
+    // Test-Series-Only students get tests only — recordings are excluded
+    // even while their enrollment is otherwise fully active. Exam access
+    // (checkExamEligibility.js / examFunctionController.js) deliberately
+    // never checks accessLevel, so this is the only place this plan is
+    // actually enforced for video.
+    if (enrollment.accessLevel === "test_series_only") {
+      return res.status(403).json({
+        success: false,
+        message:
+          "Your plan is Test Series Only — recorded lectures aren't included. Contact the academy to upgrade to Full Course Access.",
       });
     }
 

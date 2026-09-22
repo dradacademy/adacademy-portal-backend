@@ -142,6 +142,7 @@ const listCurrentLiveClasses = async (req, res) => {
       title: liveClass.title,
       startedAt: liveClass.startedAt,
       enrollmentActive,
+      accessLevel: enrollment?.accessLevel || "full",
     }));
 
     res.status(200).json({ success: true, data });
@@ -190,6 +191,16 @@ const joinLiveClass = async (req, res) => {
         success: false,
         message:
           "Your enrollment for this course has expired or is not active. Contact the academy to renew access.",
+      });
+    }
+
+    // Test-Series-Only students get tests only — live classes are excluded
+    // even while their enrollment is otherwise fully active.
+    if (enrollment.accessLevel === "test_series_only") {
+      return res.status(403).json({
+        success: false,
+        message:
+          "Your plan is Test Series Only — live classes aren't included. Contact the academy to upgrade to Full Course Access.",
       });
     }
 

@@ -8,6 +8,7 @@ const {
   getProfilePhoto,
   listProfilesAdmin,
   getProfileAdmin,
+  generateProfilePdf,
 } = require("../controllers/studentProfileController");
 
 const router = express.Router();
@@ -23,6 +24,7 @@ router.post("/me/photo", authorizeRoles("student"), upload.single("photo"), uplo
 // Admin-only listing routes.
 router.get("/", authorizeRoles("admin"), listProfilesAdmin);
 router.get("/:userId", authorizeRoles("admin"), getProfileAdmin);
+router.get("/:userId/pdf", authorizeRoles("admin"), generateProfilePdf);
 
 // Shared (ownership-checked inside the controller: the owning student, or
 // an admin).

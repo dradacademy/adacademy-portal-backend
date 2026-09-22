@@ -52,6 +52,24 @@ const streamFileToResponse = (fileId, res) => {
   });
 };
 
+// Buffers a stored file fully into memory and resolves with a Buffer —
+// unlike streamFileToResponse (which pipes straight to an Express
+// response), this is for callers that need the bytes in hand, e.g.
+// pdfkit's doc.image(), which requires a Buffer/path rather than a stream.
+// Only used for small files (profile photos); not appropriate for large
+// attachments.
+const getFileBuffer = (fileId) => {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    const downloadStream = getBucket().openDownloadStream(
+      new mongoose.Types.ObjectId(fileId)
+    );
+    downloadStream.on("data", (chunk) => chunks.push(chunk));
+    downloadStream.on("error", reject);
+    downloadStream.on("end", () => resolve(Buffer.concat(chunks)));
+  });
+};
+
 const deleteFile = async (fileId) => {
   try {
     await getBucket().delete(new mongoose.Types.ObjectId(fileId));
@@ -66,5 +84,6 @@ module.exports = {
   getBucket,
   uploadBufferToGridFs,
   streamFileToResponse,
+  getFileBuffer,
   deleteFile,
 };

@@ -38,6 +38,22 @@ const enrollmentSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    // "full" (default, unchanged behavior for every enrollment that
+    // predates this field — Mongoose applies the schema default on read)
+    // gives the usual lectures + recordings + materials + tests access.
+    // "test_series_only" is the admin's new plan for students enrolled
+    // just for the online test series: they can still see/attempt every
+    // test in this category (checkExamEligibility.js / examFunctionController.js
+    // deliberately never check this field), but are blocked from live
+    // classes, recorded lectures, and materials — see the accessLevel
+    // check in videoPlaybackController.js, liveClassController.js, and
+    // attachmentController.js, which all run this check right after their
+    // existing isEnrollmentActive check.
+    accessLevel: {
+      type: String,
+      enum: ["full", "test_series_only"],
+      default: "full",
+    },
     grantedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",

@@ -193,6 +193,7 @@ const listAvailableAttachments = async (req, res) => {
       viewed: (progressByAttachmentId.get(att._id.toString())?.viewCount || 0) > 0,
       isPreviewable: att.contentType === PREVIEWABLE_CONTENT_TYPE,
       enrollmentActive,
+      accessLevel: enrollment?.accessLevel || "full",
     }));
 
     res.status(200).json({ success: true, data });
@@ -237,6 +238,16 @@ const viewAttachmentFile = async (req, res) => {
         success: false,
         message:
           "Your enrollment for this course has expired or is not active. Contact the academy to renew access.",
+      });
+    }
+
+    // Test-Series-Only students get tests only — course materials are
+    // excluded even while their enrollment is otherwise fully active.
+    if (enrollment.accessLevel === "test_series_only") {
+      return res.status(403).json({
+        success: false,
+        message:
+          "Your plan is Test Series Only — course materials aren't included. Contact the academy to upgrade to Full Course Access.",
       });
     }
 

@@ -4,6 +4,7 @@ const XLSX = require("xlsx");
 const { Readable } = require("stream");
 const userModel = require("../models/userModel");
 const enrollmentModel = require("../models/enrollmentModel");
+const studentProfileModel = require("../models/studentProfileModel");
 const { EXAM_CATEGORIES } = require("../constants/examCategories");
 
 // Parses the optional "enrollmentValidTill" column from the bulk user-upload
@@ -241,6 +242,17 @@ const loginUser = async (req, res) => {
     delete userResponse.password;
     userResponse.lastLoginAt = now;
 
+    // Students only — tells the frontend whether to force them straight to
+    // /profile (see AuthContext.jsx's handleSubmitLoginUser). Computed here
+    // (not just on GET /users/me) because the frontend never re-fetches
+    // /me right after login — it sets userData directly from this response.
+    if (userResponse.role === "student") {
+      const profile = await studentProfileModel
+        .findOne({ userId: user._id })
+        .select("status");
+      userResponse.profileCompleted = profile?.status === "submitted";
+    }
+
     res.status(200).json({ user: userResponse, token });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -326,6 +338,22 @@ const bulkCreateUsers = async (req, res) => {
           );
         } catch (dateError) {
           sanitizedUser.enrollmentDateError = dateError.message;
+        }
+      }
+
+      // Optional: "Full Course Access" (default) vs "Test Series Only" for
+      // the enrollment this row sets up above. Same non-fatal treatment as
+      // the date column — a blank cell defaults to "full", and any other
+      // unrecognized value is reported per-row without failing the account
+      // creation itself.
+      sanitizedUser.accessLevel = "full";
+      sanitizedUser.accessLevelError = null;
+      if (user.accessLevel !== undefined && user.accessLevel !== null && String(user.accessLevel).trim() !== "") {
+        const normalizedAccessLevel = String(user.accessLevel).toLowerCase().trim();
+        if (normalizedAccessLevel === "full" || normalizedAccessLevel === "test_series_only") {
+          sanitizedUser.accessLevel = normalizedAccessLevel;
+        } else {
+          sanitizedUser.accessLevelError = `Unrecognized accessLevel "${user.accessLevel}" — use "full" or "test_series_only"`;
         }
       }
 
@@ -516,6 +544,19 @@ const bulkCreateUsers = async (req, res) => {
           continue;
         }
 
+        // An accessLevel column error is reported too, but — unlike a bad
+        // date — doesn't block the enrollment from being created at all;
+        // it just falls back to "full" (already the default sanitizedUser
+        // set above), since a plan-level typo shouldn't leave the student
+        // with no enrollment/date set up whatsoever.
+        if (user.accessLevelError) {
+          enrollmentErrors.push({
+            row: user.rowNumber,
+            email: user.email,
+            reason: `${user.accessLevelError} — defaulted to "full" for this row.`,
+          });
+        }
+
         if (!user.enrollmentValidTill) continue; // column left blank — nothing to do here
 
         enrollmentOps.push({
@@ -527,6 +568,7 @@ const bulkCreateUsers = async (req, res) => {
                 category: user.category,
                 validTill: user.enrollmentValidTill,
                 revoked: false,
+                accessLevel: user.accessLevel,
                 grantedBy: req.user._id,
               },
               $setOnInsert: { validFrom: new Date() },
@@ -637,7 +679,18 @@ const getUserData = async (req, res) => {
     if (!userData) {
       return res.status(404).json({ error: "User not found" });
     }
-    res.status(200).json(userData);
+
+    const responseData = userData.toObject();
+    // Students only — see the matching computation in loginUser above for
+    // why this has to be set in both places.
+    if (responseData.role === "student") {
+      const profile = await studentProfileModel
+        .findOne({ userId: userData._id })
+        .select("status");
+      responseData.profileCompleted = profile?.status === "submitted";
+    }
+
+    res.status(200).json(responseData);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -674,6 +727,7 @@ const downloadUserTemplate = (req, res) => {
       "role",
       "category",
       "enrollmentValidTill",
+      "accessLevel",
     ],
     [
       "7719801424",
@@ -683,6 +737,7 @@ const downloadUserTemplate = (req, res) => {
       "student",
       "gate", // one of: gate, tnpsc-ae, tnpsc-jdo, ssc-rrb-je — required for students, leave blank for evaluator/admin rows
       "19-02-2027", // optional — sets this student's course enrollment (category above) valid till this date, same as the "Manage Enrollment" screen. Format: DD-MM-YYYY. Leave blank to skip and set it up later.
+      "full", // optional — "full" (Full Course Access) or "test_series_only" (tests only, no live classes/recordings/materials). Leave blank to default to "full".
     ],
   ];
 

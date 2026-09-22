@@ -1,5 +1,6 @@
 const express = require("express");
 const checkExamEligibility = require("../middlewares/checkExamEligibility.js");
+const requireCompletedProfile = require("../middlewares/requireCompletedProfile.js");
 const {
   getEligibleExamForUser,
   manuallyPassExam,
@@ -22,6 +23,7 @@ router.get(
   "/eligible-exam/:userId",
   verifyToken,
   authorizeRoles("admin", "student"),
+  requireCompletedProfile,
   getEligibleExamForUser
 );
 router.post(
@@ -40,6 +42,7 @@ router.post(
   "/attend-exam",
   verifyToken,
   authorizeRoles("admin", "student"),
+  requireCompletedProfile,
   checkExamEligibility,
   async (req, res) => {
     try {

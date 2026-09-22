@@ -8,7 +8,7 @@ const userModel = require("../models/userModel");
 const setEnrollment = async (req, res) => {
   try {
     const { userId } = req.params;
-    const { category, validTill, revoked } = req.body;
+    const { category, validTill, revoked, accessLevel } = req.body;
 
     if (!category || !validTill) {
       return res.status(400).json({
@@ -22,6 +22,11 @@ const setEnrollment = async (req, res) => {
       return res.status(404).json({ success: false, message: "Student not found." });
     }
 
+    // Defaults to "full" whenever the caller doesn't send a recognized
+    // value — keeps any not-yet-updated frontend/API caller working exactly
+    // as before this field existed.
+    const resolvedAccessLevel = accessLevel === "test_series_only" ? "test_series_only" : "full";
+
     const enrollment = await enrollmentModel.findOneAndUpdate(
       { userId, category },
       {
@@ -29,6 +34,7 @@ const setEnrollment = async (req, res) => {
         category,
         validTill,
         revoked: revoked ?? false,
+        accessLevel: resolvedAccessLevel,
         grantedBy: req.user._id,
         $setOnInsert: { validFrom: new Date() },
       },
