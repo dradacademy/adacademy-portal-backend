@@ -100,6 +100,10 @@ app.set("trust proxy", 1);
   app.use("/api/answer-sheets", require("./routes/answerSheetRoute"));
   app.use("/api/student-progress", require("./routes/studentProgressRoute"));
   app.use("/api/student-profiles", require("./routes/studentProfileRoute"));
+  app.use(
+    "/api/performance-analytics",
+    require("./routes/performanceAnalyticsRoute"),
+  );
   // Public /careers application form — no login required, same spam-limit
   // reasoning as the enrollment-leads form above.
   app.use(
