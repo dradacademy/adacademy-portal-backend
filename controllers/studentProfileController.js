@@ -818,9 +818,26 @@ const generateProfilePdf = async (req, res) => {
     doc.fillColor(TEXT_COLOR).font("Helvetica");
 
     // Footer with generation timestamp + page numbers on every page.
+    //
+    // This sits at `page.height - 28`, which is INSIDE the page's own
+    // 46pt bottom margin by design (a footer is supposed to live in the
+    // margin). But PDFKit's own `.text()` treats any y-position past
+    // `page.height - margins.bottom` as an overflow — even with an
+    // explicit y — and reacts by silently inserting a brand-new page and
+    // drawing there instead. That fired once per footer draw here (one
+    // per real page), which is exactly the "2 extra blank pages" bug:
+    // the two blank trailing pages you'd see were each created by, and
+    // carried, the footer meant for the real page before it — which is
+    // why the real content pages had no footer at all and the blank
+    // pages had the header band + a misplaced "Page X of Y" line at the
+    // top instead of the bottom. Zeroing the bottom margin just for this
+    // one draw call removes the false "overflow" so PDFKit draws the
+    // footer in place instead of jumping to a new page.
     const pageRange = doc.bufferedPageRange();
     for (let i = 0; i < pageRange.count; i++) {
       doc.switchToPage(pageRange.start + i);
+      const savedBottomMargin = doc.page.margins.bottom;
+      doc.page.margins.bottom = 0;
       doc
         .fontSize(7.5)
         .fillColor(MUTED_COLOR)
@@ -830,6 +847,7 @@ const generateProfilePdf = async (req, res) => {
           doc.page.height - 28,
           { width: contentWidth, align: "center" }
         );
+      doc.page.margins.bottom = savedBottomMargin;
     }
 
     doc.end();
