@@ -7,6 +7,7 @@ const {
   getExamById,
   updateShuffleQuestion,
 } = require("../controllers/examController");
+const { exportExamPdf, exportExamWord } = require("../controllers/examExportController");
 const {
   verifyToken,
   authorizeRoles,
@@ -14,6 +15,9 @@ const {
 const router = express.Router();
 
 router.get("/getAll", verifyToken, authorizeRoles("admin"), getAllExams);
+// Download the exam as a formatted question paper — PDF or Word.
+router.get("/:id/export/pdf", verifyToken, authorizeRoles("admin"), exportExamPdf);
+router.get("/:id/export/word", verifyToken, authorizeRoles("admin"), exportExamWord);
 router.get("/:id", verifyToken, authorizeRoles("admin"), getExamById);
 router.post("/create", verifyToken, authorizeRoles("admin"), createExam);
 router.put("/update/:id", verifyToken, authorizeRoles("admin"), updateExam);

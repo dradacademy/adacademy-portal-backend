@@ -1,17 +1,74 @@
+// A strict "is this whole string a plain number" check — plain integers/
+// decimals ("7", "-3.2") and JS's own exponential notation ("7e-7",
+// "1.2E+3"). Deliberately stricter than plain `Number()`/`parseFloat()`
+// (which both accept things like "", " ", "0x1F", or silently truncate
+// trailing garbage) so it only ever matches a fully-numeric string.
+const PLAIN_NUMBER_RE = /^[+-]?(\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/;
+
+// "<coefficient> <x|×|*> <base> <^|**> <exponent>" scientific/power
+// notation, coefficient optional (defaults to 1) — e.g. "10^-7",
+// "10**-7", "1.5 x 10^-7", "1.5*10^-7", "2^3". Captures: [1]=coefficient
+// (without its trailing x/×/* — stripped by the group above it),
+// [2]=base, [3]=exponent.
+const POWER_NOTATION_RE =
+  /^(?:([+-]?(?:\d+\.?\d*|\.\d+))\s*[x×*]\s*)?([+-]?(?:\d+\.?\d*|\.\d+))\s*(?:\^|\*\*)\s*([+-]?(?:\d+\.?\d*|\.\d+))$/i;
+
+// Parses a numeric answer string into a plain JS number, accepting several
+// equivalent notations an admin (setting the correct answer) or a student
+// (typing an answer) might use for the same value:
+//   "0.0000007"          -> 7e-7  (plain decimal — always worked)
+//   "7e-7" / "7E-7"       -> 7e-7  (JS exponential notation — always worked)
+//   "10^-7"               -> 1e-7  (caret power notation — plain
+//                                    `parseFloat` stops at the "^" and
+//                                    silently returns 10, which is the bug
+//                                    this fixes: "10^-7" and "0.0000007"
+//                                    must both be accepted as the same
+//                                    answer)
+//   "10**-7"              -> 1e-7  (double-star power notation)
+//   "1.5 x 10^-7" / "1.5*10^-7" / "1.5×10^-7" -> 1.5e-7 (coefficient ×
+//                                    base^exponent scientific notation)
+// Returns NaN for anything not recognizably numeric, same contract as
+// parseFloat, so existing NaN handling around this function keeps working.
+const parseNumericAnswer = (raw) => {
+  if (raw === null || raw === undefined) return NaN;
+  const str = String(raw).trim();
+  if (str === "") return NaN;
+
+  if (PLAIN_NUMBER_RE.test(str)) {
+    return Number(str);
+  }
+
+  const powerMatch = str.replace(/\s+/g, " ").match(POWER_NOTATION_RE);
+  if (powerMatch) {
+    const [, coefficientRaw, baseRaw, exponentRaw] = powerMatch;
+    const coefficient = coefficientRaw === undefined ? 1 : Number(coefficientRaw);
+    const base = Number(baseRaw);
+    const exponent = Number(exponentRaw);
+    if (!Number.isNaN(coefficient) && !Number.isNaN(base) && !Number.isNaN(exponent)) {
+      return coefficient * Math.pow(base, exponent);
+    }
+  }
+
+  return NaN;
+};
+
 // Shared by getAnswerStatus/calculateMarks for a "Fill in the Blanks"
 // question flagged isNumericAnswer (the GATE-style Numerical Answer Type
 // keypad — see NumericKeypad.jsx). Compares by VALUE rather than by exact
 // string, so "2.3", "2.30", and "2.300" all match a stored correct answer
 // of "2.3" — an exact-string comparison (the non-numeric path below) would
 // wrongly mark those Incorrect just for formatting/trailing-zero
-// differences. A small epsilon absorbs floating-point rounding, not
-// intended as an answer-tolerance/range feature.
+// differences. Also accepts equivalent notations on either side via
+// `parseNumericAnswer` above — e.g. an admin-entered correct answer of
+// "10^-7" matches a student-entered "0.0000007" and vice versa. A small
+// epsilon absorbs floating-point rounding, not intended as an
+// answer-tolerance/range feature.
 const NUMERIC_MATCH_EPSILON = 1e-9;
 const isNumericMatch = (correctAnswers, studentAnswer) => {
-  const studentNum = parseFloat(studentAnswer);
+  const studentNum = parseNumericAnswer(studentAnswer);
   if (Number.isNaN(studentNum)) return false;
   return correctAnswers.some((ans) => {
-    const ansNum = parseFloat(ans);
+    const ansNum = parseNumericAnswer(ans);
     return !Number.isNaN(ansNum) && Math.abs(ansNum - studentNum) < NUMERIC_MATCH_EPSILON;
   });
 };
@@ -270,6 +327,7 @@ const calculateSpeedAndAccuracy = (enhancedExamData, totalQuestions) => {
 module.exports = {
   evaluateQuestion,
   calculateMarks,
+  parseNumericAnswer,
   getMarksByLevel,
   resolveQuestionMarks,
   resolveQuestionDuration,

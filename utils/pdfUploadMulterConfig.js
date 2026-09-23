@@ -28,8 +28,11 @@ const fileFilter = (req, file, cb) => {
 const upload = multer({
   storage,
   limits: {
-    fileSize: 15 * 1024 * 1024, // 15MB max file size
-    files: 1, // Only 1 file per upload
+    fileSize: 15 * 1024 * 1024, // 15MB max file size, per file
+    // Up to 2 files: the question-import endpoint accepts the question
+    // paper PDF ("file") plus an optional separate answer-key PDF
+    // ("answerKeyFile") via upload.fields([...]) — see questionImportRoute.js.
+    files: 2,
   },
   fileFilter,
 });
