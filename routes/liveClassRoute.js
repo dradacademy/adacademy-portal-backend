@@ -3,6 +3,7 @@ const { verifyToken, authorizeRoles } = require("../middlewares/authMiddleware")
 const requireCompletedProfile = require("../middlewares/requireCompletedProfile");
 const {
   startLiveClass,
+  updateLiveClass,
   endLiveClass,
   listLiveClasses,
   listCurrentLiveClasses,
@@ -19,6 +20,7 @@ router.use(verifyToken);
 // Admin-only management + reporting.
 router.post("/", authorizeRoles("admin"), startLiveClass);
 router.patch("/:id/end", authorizeRoles("admin"), endLiveClass);
+router.patch("/:id", authorizeRoles("admin"), updateLiveClass);
 router.get("/", authorizeRoles("admin"), listLiveClasses);
 router.get("/attendance-report", authorizeRoles("admin"), getLiveAttendanceReport);
 router.delete("/:id", authorizeRoles("admin"), deleteLiveClass);

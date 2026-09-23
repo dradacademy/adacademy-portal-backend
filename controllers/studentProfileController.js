@@ -408,7 +408,14 @@ const generateProfilePdf = async (req, res) => {
     }
 
     const ensureSpace = (needed) => {
-      if (doc.y + needed > bottomLimit) {
+      // A few points of safety margin absorb tiny rounding gaps between
+      // our own height estimates and PDFKit's actual rendered height, so
+      // borderline content never gets close enough to trip PDFKit's own
+      // automatic page-break. That auto-break bypasses our controlled
+      // addPage()/header-redraw flow and was the source of near-empty
+      // trailing pages in some exported profile PDFs (see the rules-loop
+      // fix below for the specific case that triggered it).
+      if (doc.y + needed + 4 > bottomLimit) {
         doc.addPage();
       }
     };
@@ -705,8 +712,23 @@ const generateProfilePdf = async (req, res) => {
     ];
 
     rules.forEach((rule, idx) => {
-      const fullText = `${rule.pre}${rule.bold}${rule.post}`;
-      doc.font("Helvetica").fontSize(9);
+      // Measure the numeral prefix + the full sentence TOGETHER, in the
+      // bold face throughout. Two things the old estimate left out could
+      // each shave off just enough margin to under-count a wrapped line:
+      // the leading "1. " eating into the first line's available width
+      // (the estimate below measured only pre+bold+post, as if the line
+      // started fresh at the left margin), and the bold segments actually
+      // being wider than the plain "Helvetica" used for the estimate.
+      // Bold is never narrower than regular in the same family, so
+      // measuring the whole line in it is a safe worst-case upper bound.
+      // When the real render needed one more wrapped line than this
+      // predicted, PDFKit's own automatic page-break fired mid-paragraph
+      // — bypassing ensureSpace()'s controlled addPage()/header-redraw —
+      // and left a near-empty trailing page, which is the "2 extra blank
+      // pages" bug in exported profile PDFs.
+      const numeral = `${idx + 1}. `;
+      const fullText = `${numeral}${rule.pre}${rule.bold}${rule.post}`;
+      doc.font("Helvetica-Bold").fontSize(9);
       const h = doc.heightOfString(fullText, { width: contentWidth - 16 }) + 4;
       ensureSpace(h);
       doc.font("Helvetica-Bold").fontSize(9).fillColor(TEXT_COLOR).text(`${idx + 1}.`, doc.page.margins.left, doc.y, {

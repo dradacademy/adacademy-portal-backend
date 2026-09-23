@@ -59,6 +59,52 @@ const startLiveClass = async (req, res) => {
   }
 };
 
+// PATCH /api/live-classes/:id (admin only) — edit metadata (title,
+// category, subject, or swap the YouTube Live link itself) on an existing
+// history row — active or already-ended, same as RecordedClass's edit
+// (see updateRecordedClass in recordedClassController.js). Doesn't touch
+// `active`/`startedAt`/`endedAt` — those stay owned by Go Live/End Live/
+// Delete so this can't be used to sneak a class back to "live" or hide
+// when it actually started.
+const updateLiveClass = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { title, category, subject, youtubeUrl } = req.body;
+
+    const update = {};
+    if (title !== undefined) update.title = title;
+    if (category !== undefined) update.category = category;
+    if (subject !== undefined) update.subject = subject || null;
+    if (youtubeUrl !== undefined) {
+      const youtubeVideoId = extractYoutubeVideoId(youtubeUrl);
+      if (!youtubeVideoId) {
+        return res.status(400).json({
+          success: false,
+          message: "That doesn't look like a valid YouTube link or video ID.",
+        });
+      }
+      update.youtubeVideoId = youtubeVideoId;
+    }
+
+    const liveClass = await liveClassModel.findByIdAndUpdate(id, update, {
+      new: true,
+    });
+
+    if (!liveClass) {
+      return res.status(404).json({ success: false, message: "Live class not found." });
+    }
+
+    res.status(200).json({ success: true, data: liveClass });
+  } catch (error) {
+    console.error("Failed to update live class:", error.name, error.message);
+    res.status(500).json({
+      success: false,
+      message: "Failed to update live class.",
+      error: error.message,
+    });
+  }
+};
+
 // PATCH /api/live-classes/:id/end (admin only) — "End Live". Doesn't touch
 // YouTube itself (the admin ends the actual broadcast there, same as
 // always) — this just stops the app from showing it as ongoing.
@@ -353,6 +399,7 @@ const deleteLiveClass = async (req, res) => {
 
 module.exports = {
   startLiveClass,
+  updateLiveClass,
   endLiveClass,
   listLiveClasses,
   listCurrentLiveClasses,
