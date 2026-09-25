@@ -6,6 +6,7 @@ const {
   deleteExam,
   getExamById,
   updateShuffleQuestion,
+  regradeExam,
 } = require("../controllers/examController");
 const { exportExamPdf, exportExamWord } = require("../controllers/examExportController");
 const {
@@ -28,5 +29,8 @@ router.put(
   updateShuffleQuestion
 );
 router.delete("/delete/:id", verifyToken, authorizeRoles("admin"), deleteExam);
+// On-demand: re-grade every already-completed submission for this exam
+// against its current answer key/marks/pass percentage (see regradeHelper).
+router.post("/:id/regrade", verifyToken, authorizeRoles("admin"), regradeExam);
 
 module.exports = router;

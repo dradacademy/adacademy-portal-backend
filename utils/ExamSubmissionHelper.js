@@ -73,11 +73,50 @@ const isNumericMatch = (correctAnswers, studentAnswer) => {
   });
 };
 
+// NAT range grading — used when a question's natAnswerMode is "range"
+// (admin set rangeMin/rangeMax) instead of a fixed list of exact accepted
+// values. A submission is correct when it parses to a number that falls
+// within [min, max] inclusive on either boundary, e.g. a range of "10 to
+// 15" accepts 10, 12.5, and 15. min/max are taken in whichever order they
+// numerically fall (not the order they're stored) so a range accidentally
+// saved reversed still grades sensibly rather than accepting nothing.
+const isNumericInRange = (rangeMin, rangeMax, studentAnswer) => {
+  const studentNum = parseNumericAnswer(studentAnswer);
+  const minNum = parseNumericAnswer(rangeMin);
+  const maxNum = parseNumericAnswer(rangeMax);
+  if (Number.isNaN(studentNum) || Number.isNaN(minNum) || Number.isNaN(maxNum)) {
+    return false;
+  }
+  const lo = Math.min(minNum, maxNum);
+  const hi = Math.max(minNum, maxNum);
+  return (
+    studentNum >= lo - NUMERIC_MATCH_EPSILON &&
+    studentNum <= hi + NUMERIC_MATCH_EPSILON
+  );
+};
+
+// Shared by getAnswerStatus/calculateMarks: resolves whether a NAT-style
+// "Fill in the Blanks" question is correct, dispatching to the range check
+// above when the admin picked range mode, and to the existing exact-value
+// match otherwise. Keeping this in one place is what keeps the two
+// independent call sites (isRight display vs. actual marks) from ever
+// disagreeing about whether an answer was correct.
+const isNumericAnswerCorrect = (question, studentAnswer) => {
+  const { correctAnswers, natAnswerMode, rangeMin, rangeMax } = question;
+  if (natAnswerMode === "range") {
+    return isNumericInRange(rangeMin, rangeMax, studentAnswer);
+  }
+  return isNumericMatch(correctAnswers, studentAnswer);
+};
+
 const getAnswerStatus = ({
   questionType,
   correctAnswers,
   studentAnswer,
   isNumericAnswer,
+  natAnswerMode,
+  rangeMin,
+  rangeMax,
 }) => {
   if (
     !studentAnswer ||
@@ -100,7 +139,10 @@ const getAnswerStatus = ({
 
     case "Fill in the Blanks": {
       const isCorrect = isNumericAnswer
-        ? isNumericMatch(correctAnswers, studentAnswer)
+        ? isNumericAnswerCorrect(
+            { correctAnswers, natAnswerMode, rangeMin, rangeMax },
+            studentAnswer,
+          )
         : correctAnswers.some(
             (ans) => normalizeNoSpace(ans) === normalizeNoSpace(studentAnswer),
           );
@@ -145,6 +187,9 @@ const evaluateQuestion = (question, studQuestion) => {
         correctAnswers: question.correctAnswers,
         studentAnswer: studQuestion.studentAnswer,
         isNumericAnswer: question.isNumericAnswer,
+        natAnswerMode: question.natAnswerMode,
+        rangeMin: question.rangeMin,
+        rangeMax: question.rangeMax,
       })
     : "Skipped";
 
@@ -156,7 +201,8 @@ const evaluateQuestion = (question, studQuestion) => {
 };
 
 const calculateMarks = (question, studQuestion, positiveMark, negativeMark) => {
-  const { questionType, correctAnswers, isNumericAnswer } = question;
+  const { questionType, correctAnswers, isNumericAnswer, natAnswerMode, rangeMin, rangeMax } =
+    question;
   const studentAnswer = studQuestion.studentAnswer;
 
   if (
@@ -180,7 +226,10 @@ const calculateMarks = (question, studQuestion, positiveMark, negativeMark) => {
       const normalizeNoSpace = (str) => str.toLowerCase().replace(/\s+/g, "");
 
       const isCorrect = isNumericAnswer
-        ? isNumericMatch(correctAnswers, studentAnswer)
+        ? isNumericAnswerCorrect(
+            { correctAnswers, natAnswerMode, rangeMin, rangeMax },
+            studentAnswer,
+          )
         : correctAnswers.some(
             (ans) => normalizeNoSpace(ans) === normalizeNoSpace(studentAnswer),
           );
@@ -326,6 +375,7 @@ const calculateSpeedAndAccuracy = (enhancedExamData, totalQuestions) => {
 
 module.exports = {
   evaluateQuestion,
+  getAnswerStatus,
   calculateMarks,
   parseNumericAnswer,
   getMarksByLevel,

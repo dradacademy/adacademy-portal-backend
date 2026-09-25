@@ -7,6 +7,7 @@ const attemptCounterModel = require("../models/attemptCounterModel");
 const reviewModel = require("../models/ReviewModel");
 const { retryTransaction } = require("../utils/transactionHelper");
 const { createNotification } = require("./notificationController");
+const { regradeExamSubmissions } = require("../utils/regradeHelper");
 
 /**
  * For MCQ/MSQ: ensure correctAnswers contains only values
@@ -49,6 +50,23 @@ const sanitizeCorrectAnswers = (question) => {
 
   // Deduplicate
   return [...new Set(resolved)];
+};
+
+/**
+ * Resolves the NAT range-grading fields for a question being created or
+ * updated. Only meaningful when the admin picked "range" mode for a
+ * numeric-answer question — otherwise both fields are always forced back to
+ * null, so a question that was previously in range mode and gets edited
+ * back to exact mode (or to a non-numeric type) never keeps stale
+ * rangeMin/rangeMax data from an earlier edit.
+ */
+const resolveNatRangeFields = (question) => {
+  const mode = question.natAnswerMode === "range" ? "range" : "exact";
+  return {
+    natAnswerMode: mode,
+    rangeMin: mode === "range" ? question.rangeMin ?? null : null,
+    rangeMax: mode === "range" ? question.rangeMax ?? null : null,
+  };
 };
 
 const selectRandomQuestions = (pool, config, typeMap = null) => {
@@ -149,6 +167,7 @@ const createExam = async (req, res) => {
           // (NAT-style)" checkbox state and fell back to the schema
           // default (false), regardless of what the admin ticked.
           isNumericAnswer: !!question.isNumericAnswer,
+          ...resolveNatRangeFields(question),
           image: question.image,
           answerKeyText: question.answerKeyText,
           answerKeyImage: question.answerKeyImage,
@@ -487,6 +506,7 @@ const updateExam = async (req, res) => {
                 // re-editing an existing question and ticking "Numeric
                 // answer (NAT-style)" never actually saved the change.
                 isNumericAnswer: !!question.isNumericAnswer,
+                ...resolveNatRangeFields(question),
                 image: question.image ?? existingQuestion.image,
                 answerKeyText: question.answerKeyText ?? existingQuestion.answerKeyText,
                 answerKeyImage: question.answerKeyImage ?? existingQuestion.answerKeyImage,
@@ -510,6 +530,7 @@ const updateExam = async (req, res) => {
                 options: question.options,
                 correctAnswers: sanitizeCorrectAnswers(question),
                 isNumericAnswer: !!question.isNumericAnswer,
+                ...resolveNatRangeFields(question),
                 image: question.image,
                 answerKeyText: question.answerKeyText,
                 answerKeyImage: question.answerKeyImage,
@@ -651,10 +672,26 @@ const updateExam = async (req, res) => {
 
     const finalExam = await examModel.findById(examId).populate("questions");
 
+    // Retroactively re-grade every already-completed submission for this
+    // exam against whatever the answer key/marks/pass percentage look
+    // like now — e.g. an admin switching a NAT question to range mode, or
+    // fixing a wrong answer key, must correct already-attempted students'
+    // marks and pass/fail too, not just future attempts. See
+    // utils/regradeHelper.js. Failure here must never fail the exam
+    // update itself (the edit already succeeded and was already
+    // committed) — log and report a null summary instead.
+    let regradeSummary = null;
+    try {
+      regradeSummary = await regradeExamSubmissions(examId);
+    } catch (regradeError) {
+      console.error("Post-update regrade failed:", regradeError);
+    }
+
     return res.status(200).json({
       success: true,
       message: "Exam and questions updated successfully",
       data: finalExam,
+      regradeSummary,
     });
   } catch (error) {
     console.error("updateExam error:", error);
@@ -825,6 +862,44 @@ const deleteExam = async (req, res) => {
   }
 };
 
+// On-demand admin action: re-grade every already-completed submission for
+// one exam against its CURRENT answer key/marks/pass percentage, without
+// requiring the admin to touch anything else about the exam. Exists as a
+// manual complement to updateExam's automatic post-save regrade — for an
+// exam whose answer key was already edited (e.g. before this regrade
+// mechanism existed), an admin can trigger the correction directly.
+const regradeExam = async (req, res) => {
+  try {
+    const examId = req.params.id;
+
+    const exam = await examModel.findById(examId);
+    if (!exam) {
+      return res.status(404).json({
+        success: false,
+        message: "Exam not found with the provided ID",
+      });
+    }
+
+    const regradeSummary = await regradeExamSubmissions(examId);
+
+    return res.status(200).json({
+      success: true,
+      message:
+        regradeSummary.marksChanged > 0 || regradeSummary.passChanged > 0
+          ? `Re-graded ${regradeSummary.totalChecked} completed attempt(s): ${regradeSummary.marksChanged} mark(s) updated, ${regradeSummary.passChanged} pass/fail status(es) changed.`
+          : `Checked ${regradeSummary.totalChecked} completed attempt(s) — all already match the current answer key.`,
+      regradeSummary,
+    });
+  } catch (error) {
+    console.error("regradeExam error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to re-grade exam submissions",
+      error: error.message,
+    });
+  }
+};
+
 module.exports = {
   createExam,
   getAllExams,
@@ -832,4 +907,5 @@ module.exports = {
   updateShuffleQuestion,
   getExamById,
   deleteExam,
+  regradeExam,
 };
