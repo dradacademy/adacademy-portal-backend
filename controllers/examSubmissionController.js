@@ -18,13 +18,20 @@ const {
 } = require("../utils/ExamSubmissionHelper");
 const durationModel = require("../models/durationModel");
 const { retryTransaction } = require("../utils/transactionHelper");
+const { getLatestAttemptsOnly } = require("../utils/latestAttemptHelper");
 
 const getAllPassedSubmission = async (req, res) => {
   try {
-    const passedData = await examSubmissionSchema
-      .find({
-        pass: true,
-      })
+    // "Last attempt only" rule: a student's earlier passed attempt no
+    // longer counts as "passed" once a later attempt on the same exam has
+    // been completed — only their single most recent completed attempt on
+    // each exam decides pass/fail here. Fetch every completed submission
+    // (not pre-filtered to pass:true, since we need each student's latest
+    // attempt regardless of which way it went, to know whether IT passed),
+    // reduce to one per (userId, examId), then keep only the ones that
+    // passed.
+    const rawSubmissions = await examSubmissionSchema
+      .find({ status: "completed" })
       .populate({
         path: "examId",
         select: "subject subTopic order examCode passPercentage questions",
@@ -43,6 +50,10 @@ const getAllPassedSubmission = async (req, res) => {
         ],
       })
       .populate("userId");
+
+    const passedData = getLatestAttemptsOnly(rawSubmissions).filter(
+      (sub) => sub.pass === true,
+    );
 
     for (let submission of passedData) {
       if (
@@ -89,10 +100,14 @@ const getPassedSubmissionForUser = async (req, res) => {
       });
     }
 
-    const passedData = await examSubmissionSchema
+    // "Last attempt only" rule: this student's earlier pass on an exam no
+    // longer counts once a later attempt on that same exam has completed —
+    // reduce to one submission per exam (their latest completed attempt),
+    // then keep only the ones that passed.
+    const rawSubmissions = await examSubmissionSchema
       .find({
         userId: userId,
-        pass: true,
+        status: "completed",
       })
       .populate({
         path: "examId",
@@ -111,6 +126,10 @@ const getPassedSubmissionForUser = async (req, res) => {
           },
         ],
       });
+
+    const passedData = getLatestAttemptsOnly(rawSubmissions).filter(
+      (sub) => sub.pass === true,
+    );
 
     for (let submission of passedData) {
       if (
@@ -142,10 +161,13 @@ const getPassedSubmissionForUser = async (req, res) => {
 
 const getAllPreviousAttempt = async (req, res) => {
   try {
-    const previousAttemptData = await examSubmissionSchema
-      .find({
-        pass: false,
-      })
+    // "Last attempt only" rule: an earlier failed attempt no longer counts
+    // once a later attempt on the same exam has completed (whichever way
+    // that later one went) — reduce to one submission per (userId, examId)
+    // (their latest completed attempt), then keep only the ones that
+    // didn't pass.
+    const rawSubmissions = await examSubmissionSchema
+      .find({ status: "completed" })
       .populate({
         path: "examId",
         select: "subject subTopic order examCode passPercentage questions",
@@ -165,6 +187,12 @@ const getAllPreviousAttempt = async (req, res) => {
       })
       .populate("userId")
       .sort({ createdAt: -1 });
+
+    const previousAttemptData = getLatestAttemptsOnly(rawSubmissions)
+      .filter((sub) => sub.pass === false)
+      .sort(
+        (a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0),
+      );
 
     for (let submission of previousAttemptData) {
       if (
@@ -211,10 +239,14 @@ const getPreviousAttemptForUser = async (req, res) => {
       });
     }
 
-    const previousAttemptData = await examSubmissionSchema
+    // "Last attempt only" rule: an earlier failed attempt on an exam no
+    // longer counts once this student's later attempt on it has
+    // completed — reduce to one submission per exam (their latest
+    // completed attempt), then keep only the ones that didn't pass.
+    const rawSubmissions = await examSubmissionSchema
       .find({
         userId: userId,
-        pass: false,
+        status: "completed",
       })
       .populate({
         path: "examId",
@@ -234,6 +266,12 @@ const getPreviousAttemptForUser = async (req, res) => {
         ],
       })
       .sort({ createdAt: -1 });
+
+    const previousAttemptData = getLatestAttemptsOnly(rawSubmissions)
+      .filter((sub) => sub.pass === false)
+      .sort(
+        (a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0),
+      );
 
     for (let submission of previousAttemptData) {
       if (
@@ -291,7 +329,7 @@ const getExamStatusOverviewForUser = async (req, res) => {
       });
     }
 
-    const submissions = await examSubmissionSchema
+    const rawSubmissions = await examSubmissionSchema
       .find({ userId, status: "completed" })
       .populate({
         path: "examId",
@@ -306,6 +344,12 @@ const getExamStatusOverviewForUser = async (req, res) => {
       })
       .sort({ updatedAt: -1 })
       .lean();
+    // "Last attempt only" rule: one row per exam (this student's single
+    // most recent completed attempt on it) — a retaken exam no longer
+    // shows up twice, once for each attempt, and its old superseded
+    // pass/fail result no longer counts once a later attempt has
+    // completed.
+    const submissions = getLatestAttemptsOnly(rawSubmissions);
 
     // Resolve subtopic names + attempt-permission info (does this student
     // have a second/third attempt granted on this exam?) per submission.

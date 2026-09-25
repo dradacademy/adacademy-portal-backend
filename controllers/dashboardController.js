@@ -10,6 +10,10 @@ const videoProgressModel = require("../models/videoProgressModel");
 const {
   calculateTotalPossibleMarks,
 } = require("../utils/ExamSubmissionHelper");
+const {
+  getLatestAttemptsOnly,
+  latestAttemptOnlyStages,
+} = require("../utils/latestAttemptHelper");
 
 // Get all exams overview
 const getAllExamsOverview = async (req, res) => {
@@ -50,10 +54,22 @@ const getAllExamsOverview = async (req, res) => {
         },
         { $unwind: { path: "$subjectData", preserveNullAndEmptyArrays: true } },
         {
+          // "Last attempt only" rule: this $lookup pipeline reduces every
+          // student's submissions for this exam down to their single most
+          // recent attempt (highest attemptNumber) BEFORE any of the
+          // completed/passed/marks counting below runs, so a student who
+          // failed attempt 1 and passed attempt 2 counts once, as passed —
+          // not twice, once each way. See utils/latestAttemptHelper.js for
+          // the equivalent plain-array helper used elsewhere.
           $lookup: {
             from: "examsubmissions",
-            localField: "_id",
-            foreignField: "examId",
+            let: { examId: "$_id" },
+            pipeline: [
+              { $match: { $expr: { $eq: ["$examId", "$$examId"] } } },
+              { $sort: { userId: 1, attemptNumber: -1 } },
+              { $group: { _id: "$userId", doc: { $first: "$$ROOT" } } },
+              { $replaceRoot: { newRoot: "$doc" } },
+            ],
             as: "submissions",
           },
         },
@@ -276,14 +292,17 @@ const getExamDetailedAnalysis = async (req, res) => {
         (st) => st._id.toString() === exam.subTopic?.toString(),
       ) || null;
 
-    // 3️⃣ Fetch submissions
-    const submissions = await ExamSubmission.find({ examId })
+    // 3️⃣ Fetch submissions — "last attempt only" rule: every stat, rank,
+    // and count below is computed from each student's single most recent
+    // attempt on this exam, not every attempt they've ever made.
+    const rawSubmissions = await ExamSubmission.find({ examId })
       .populate("userId", "username email")
       .populate(
         "examData.questionId",
         "question subTopic questionType correctAnswer",
       )
       .lean();
+    const submissions = getLatestAttemptsOnly(rawSubmissions);
 
     // Fetch mark configuration
     const markData = await markModel.findById("mark-based-on-levels");
@@ -592,13 +611,17 @@ const getAllStudentsOverview = async (req, res) => {
     // Process each student
     const studentsData = await Promise.all(
       allStudents.map(async (student) => {
-        const submissions = await ExamSubmission.find({ userId: student._id })
+        // "Last attempt only" rule: one entry per exam this student has
+        // ever attempted — their single most recent attempt on it — not
+        // every attempt across every retake.
+        const rawSubmissions = await ExamSubmission.find({ userId: student._id })
           .populate({
             path: "examId",
             select: "questions",
             populate: { path: "questions" },
           })
           .lean();
+        const submissions = getLatestAttemptsOnly(rawSubmissions);
 
         const totalExams = submissions.length;
         const passedExams = submissions.filter((sub) => sub.pass === true).length;
@@ -685,7 +708,11 @@ const getStudentDetailedAnalysis = async (req, res) => {
       });
     }
 
-    const submissions = await ExamSubmission.find({ userId: studentId })
+    // "Last attempt only" rule: one entry per exam this student has ever
+    // attempted — their single most recent attempt on it — feeds every
+    // section below (percentage, subject/topic breakdowns, exam summary,
+    // attempt summary).
+    const rawSubmissions = await ExamSubmission.find({ userId: studentId })
       .populate({
         path: "examId",
         populate: [
@@ -700,6 +727,7 @@ const getStudentDetailedAnalysis = async (req, res) => {
       })
       .populate("examData.questionId", "topic subTopic questionType")
       .lean();
+    const submissions = getLatestAttemptsOnly(rawSubmissions);
 
     // A. Basic Details
     const basicDetails = {
@@ -760,6 +788,9 @@ const getStudentDetailedAnalysis = async (req, res) => {
           let: { studentId: "$_id" },
           pipeline: [
             { $match: { $expr: { $eq: ["$userId", "$$studentId"] } } },
+            // "Last attempt only" rule: average across each exam's most
+            // recent attempt for this student, not every retake.
+            ...latestAttemptOnlyStages(),
             { $group: { _id: null, avgScore: { $avg: "$obtainedMark" } } },
           ],
           as: "scoreInfo",
@@ -844,18 +875,24 @@ const getStudentDetailedAnalysis = async (req, res) => {
       ),
     ];
 
-    const [allSubmissionsForTheseExams, studentAttemptCounters] =
+    const [rawSubmissionsForTheseExams, studentAttemptCounters] =
       await Promise.all([
         ExamSubmission.find({
           examId: { $in: completedExamIds },
           status: "completed",
         })
-          .select("examId userId obtainedMark timetaken")
+          .select("examId userId obtainedMark timetaken attemptNumber completedAt")
           .lean(),
         attemptCounterModel
           .find({ userId: studentId, examId: { $in: completedExamIds } })
           .lean(),
       ]);
+    // "Last attempt only" rule: rank this student against every OTHER
+    // student's own single most recent completed attempt per exam, not
+    // every attempt anyone has ever made.
+    const allSubmissionsForTheseExams = getLatestAttemptsOnly(
+      rawSubmissionsForTheseExams,
+    );
 
     const rankMapsByExam = new Map(); // examId -> { marksRank: Map<submissionUserId,rank>, timeRank: Map }
     completedExamIds.forEach((examIdStr) => {
@@ -944,9 +981,11 @@ const getStudentDetailedAnalysis = async (req, res) => {
           pass: sub.pass,
           submittedAt: sub.updatedAt,
           maxAllowedAttempts: counter?.maxAllowedAttempts ?? 3,
-          // Speed %/Accuracy % for THIS specific attempt (each submission
-          // document is one independent attempt, so examSummary already
-          // has one entry per attempt, not collapsed to the latest).
+          // Speed %/Accuracy % for this student's LATEST completed attempt
+          // on this exam — `submissions` was already reduced to one entry
+          // per exam (their most recent attempt) above, per the "last
+          // attempt only" rule, so examSummary has one row per exam here,
+          // not one row per attempt.
           speedPercent: sub.speedPercent ?? null,
           accuracyPercent: sub.accuracyPercent ?? null,
         };
@@ -1266,7 +1305,7 @@ const getTopicPerformanceOverview = async (req, res) => {
       throw new Error("Mark configuration not found");
     }
 
-    const submissions = await ExamSubmission.find({
+    const rawSubmissions = await ExamSubmission.find({
       examId: { $in: examIds },
       status: "completed",
     })
@@ -1277,6 +1316,12 @@ const getTopicPerformanceOverview = async (req, res) => {
       })
       .populate("userId", "username email")
       .lean();
+    // "Last attempt only" rule: one entry per student per exam (their most
+    // recent completed attempt) before rolling up into topic averages —
+    // otherwise a student who retook one exam in a topic would count that
+    // exam's percentage multiple times and skew both their own topic
+    // average and the topic's class average.
+    const submissions = getLatestAttemptsOnly(rawSubmissions);
 
     // key: `${subjectId}|${subTopicId}`
     const topicMap = new Map();

@@ -174,13 +174,18 @@ const computeStudentProgress = async (students) => {
     const examList = categoryExams.map((exam) => {
       const subs = studentExamSubs.get(exam._id.toString()) || [];
       const completed = subs.length > 0;
+      // "Last attempt only" rule: `subs` is sorted by attemptNumber
+      // ascending (see the ExamSubmission query above), so the LAST entry
+      // is this student's most recent completed attempt — that one's mark
+      // is what counts, not their best-ever attempt.
+      const latestSub = subs.length > 0 ? subs[subs.length - 1] : null;
       return {
         examId: exam._id,
         examCode: exam.examCode,
         completed,
         attemptsCount: subs.length,
-        bestMark: completed ? Math.max(...subs.map((s) => s.obtainedMark || 0)) : null,
-        lastAttemptAt: completed ? subs[subs.length - 1].completedAt : null,
+        lastMark: latestSub ? latestSub.obtainedMark || 0 : null,
+        lastAttemptAt: latestSub ? latestSub.completedAt : null,
       };
     });
     const completedExams = examList.filter((e) => e.completed).length;

@@ -7,6 +7,7 @@ const VideoProgress = require("../models/videoProgressModel");
 const AttachmentProgress = require("../models/attachmentProgressModel");
 const { calculateTotalPossibleMarks } = require("./ExamSubmissionHelper");
 const { EXAM_CATEGORIES, EXAM_CATEGORY_LABELS } = require("../constants/examCategories");
+const { getLatestAttemptsOnly } = require("./latestAttemptHelper");
 
 // How recent counts as "engaged" for the Engagement-to-Performance
 // correlation on the admin Category Rollup — watched at least one video or
@@ -79,14 +80,18 @@ const computeCategoryPerformance = async (studentId) => {
   // stat below (overall, per-exam, per-topic, speed/accuracy) is derived
   // from this single dataset, same "fetch once, derive everything" pattern
   // already used by getTopicPerformanceOverview in dashboardController.js.
-  const submissions = await ExamSubmission.find({
+  const rawSubmissions = await ExamSubmission.find({
     examId: { $in: examIds },
     status: "completed",
   })
-    .select("examId userId obtainedMark speedPercent accuracyPercent")
+    .select("examId userId obtainedMark speedPercent accuracyPercent attemptNumber completedAt")
     .populate({ path: "examId", select: "subject subTopic questions", populate: { path: "questions" } })
     .populate("userId", "username")
     .lean();
+  // "Last attempt only" rule: every stat/rank below is computed from each
+  // student's single most recent completed attempt per exam, not every
+  // attempt anyone in the category has ever made.
+  const submissions = getLatestAttemptsOnly(rawSubmissions);
 
   if (submissions.length === 0) return emptyResult;
 
@@ -294,7 +299,7 @@ const computeCategoryLeaderboards = async (studentId) => {
     examId: { $in: exams.map((e) => e._id) },
     status: "completed",
   })
-    .select("examId userId obtainedMark completedAt")
+    .select("examId userId obtainedMark completedAt attemptNumber")
     .populate({ path: "examId", select: "subject subTopic questions", populate: { path: "questions" } })
     .populate("userId", "username")
     .lean();
@@ -318,20 +323,29 @@ const computeCategoryLeaderboards = async (studentId) => {
       name: sub.userId?.username || "—",
       pct: pctOf(sub),
       completedAt: sub.completedAt ? new Date(sub.completedAt).getTime() : Infinity,
+      attemptNumber: sub.attemptNumber ?? -Infinity,
     });
   });
 
   const leaderboards = [];
   examGroups.forEach((list, eid) => {
-    // Best attempt per student on this test (a student can have up to 3
-    // attempts — the leaderboard should reflect their best showing, not
-    // penalize/duplicate them for retrying).
-    const bestByStudent = new Map();
+    // "Last attempt only" rule: a student can have up to 3+ attempts on a
+    // test — the leaderboard reflects their single most recent attempt,
+    // not their best-ever showing, so a student who passed on attempt 1
+    // but did worse on a later retake shows their later (current) result,
+    // same as everywhere else in the app.
+    const latestByStudent = new Map();
     list.forEach((entry) => {
-      const existing = bestByStudent.get(entry.studentId);
-      if (!existing || entry.pct > existing.pct) bestByStudent.set(entry.studentId, entry);
+      const existing = latestByStudent.get(entry.studentId);
+      if (
+        !existing ||
+        entry.attemptNumber > existing.attemptNumber ||
+        (entry.attemptNumber === existing.attemptNumber && entry.completedAt > existing.completedAt)
+      ) {
+        latestByStudent.set(entry.studentId, entry);
+      }
     });
-    const sorted = [...bestByStudent.values()].sort(
+    const sorted = [...latestByStudent.values()].sort(
       (a, b) => b.pct - a.pct || a.completedAt - b.completedAt
     );
 
@@ -615,12 +629,21 @@ const computeCategoryRollup = async (category, { fromDate, toDate } = {}) => {
     if (toDate) query.completedAt.$lte = new Date(toDate);
   }
 
-  const submissions = await ExamSubmission.find(query)
-    .select("examId userId obtainedMark speedPercent accuracyPercent pass")
+  const rawSubmissions = await ExamSubmission.find(query)
+    .select("examId userId obtainedMark speedPercent accuracyPercent pass attemptNumber completedAt")
     .populate({ path: "examId", select: "subject subTopic questions", populate: { path: "questions" } })
     .lean();
 
-  if (submissions.length === 0) return emptyResult;
+  if (rawSubmissions.length === 0) return emptyResult;
+
+  // "Last attempt only" rule: passRate/avgPercentage/avgSpeed/avgAccuracy/
+  // mostMissedTopics/engagement below are all computed from each student's
+  // single most recent completed attempt per exam within this window (a
+  // retaken exam no longer counts twice, once for each attempt). Raw
+  // attempt VOLUME in the period (`totalAttempts` below) intentionally
+  // keeps counting every attempt made — that's a genuine activity metric,
+  // not a per-student stat, so it isn't deduped.
+  const submissions = getLatestAttemptsOnly(rawSubmissions);
 
   const round1 = (n) => (n === null || n === undefined ? null : Math.round(n * 10) / 10);
   const avg = (arr) => (arr.length ? arr.reduce((s, v) => s + v, 0) / arr.length : null);
@@ -720,7 +743,7 @@ const computeCategoryRollup = async (category, { fromDate, toDate } = {}) => {
     category,
     categoryLabel: EXAM_CATEGORY_LABELS[category] || category,
     hasData: true,
-    totalAttempts: submissions.length,
+    totalAttempts: rawSubmissions.length,
     distinctStudents: studentIds.size,
     passRate:
       passFlags.length > 0
