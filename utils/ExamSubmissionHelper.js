@@ -109,6 +109,32 @@ const isNumericAnswerCorrect = (question, studentAnswer) => {
   return isNumericMatch(correctAnswers, studentAnswer);
 };
 
+// Index-based identity helpers for MCQ/MSQ correctness, preferred over
+// text comparison whenever both the question's `correctOptionIndexes` and
+// the submission's `studentAnswerIndexes` are available. Text-only
+// comparison breaks when multiple options in a question share identical
+// text — the routine case for image-only options, whose text is blank —
+// because selecting one such option can't be distinguished from selecting
+// any other. Position (index), unlike text, is always unambiguous. Falls
+// back to the legacy text-based comparison whenever either side lacks
+// index data, which covers every question/submission that existed before
+// this fix — no backfill/migration needed. See the schema comments on
+// Question.correctOptionIndexes and examSubmissionSchema's
+// studentAnswerIndexes for the full rationale.
+const hasIndexIdentity = (correctOptionIndexes, studentAnswerIndexes) =>
+  Array.isArray(correctOptionIndexes) &&
+  correctOptionIndexes.length > 0 &&
+  Array.isArray(studentAnswerIndexes);
+
+const isMcqCorrectByIndex = (correctOptionIndexes, studentAnswerIndexes) =>
+  studentAnswerIndexes.length === 1 &&
+  correctOptionIndexes.includes(studentAnswerIndexes[0]);
+
+const getMsqIndexSets = (correctOptionIndexes, studentAnswerIndexes) => ({
+  correctSet: new Set(correctOptionIndexes),
+  studentSet: new Set(studentAnswerIndexes),
+});
+
 const getAnswerStatus = ({
   questionType,
   correctAnswers,
@@ -117,10 +143,21 @@ const getAnswerStatus = ({
   natAnswerMode,
   rangeMin,
   rangeMax,
+  correctOptionIndexes,
+  studentAnswerIndexes,
 }) => {
+  // A blank-text MCQ/MSQ option (the normal case for image-only options) is
+  // a legitimate answer once the student has picked an index for it — don't
+  // let the "no text answer" check below mistake that for a skip. Only the
+  // TEXT-based fallback path needs this guard; index-based selections carry
+  // their own "was anything picked" signal via a non-empty index array.
+  const hasIndexAnswer =
+    Array.isArray(studentAnswerIndexes) && studentAnswerIndexes.length > 0;
+
   if (
-    !studentAnswer ||
-    (Array.isArray(studentAnswer) && studentAnswer.length === 0)
+    !hasIndexAnswer &&
+    (!studentAnswer ||
+      (Array.isArray(studentAnswer) && studentAnswer.length === 0))
   ) {
     return "Skipped";
   }
@@ -130,9 +167,9 @@ const getAnswerStatus = ({
 
   switch (questionType) {
     case "MCQ": {
-      const isCorrect = correctAnswers
-        .map(normalize)
-        .includes(normalize(studentAnswer));
+      const isCorrect = hasIndexIdentity(correctOptionIndexes, studentAnswerIndexes)
+        ? isMcqCorrectByIndex(correctOptionIndexes, studentAnswerIndexes)
+        : correctAnswers.map(normalize).includes(normalize(studentAnswer));
 
       return isCorrect ? "Correct" : "Incorrect";
     }
@@ -151,16 +188,24 @@ const getAnswerStatus = ({
     }
 
     case "MSQ": {
-      const correctSet = new Set(correctAnswers.map(normalize));
-      const studentSet = new Set(studentAnswer.map(normalize));
+      let correctCount, correctSize, hasWrong;
+      if (hasIndexIdentity(correctOptionIndexes, studentAnswerIndexes)) {
+        const { correctSet, studentSet } = getMsqIndexSets(
+          correctOptionIndexes,
+          studentAnswerIndexes,
+        );
+        correctCount = [...studentSet].filter((i) => correctSet.has(i)).length;
+        hasWrong = [...studentSet].some((i) => !correctSet.has(i));
+        correctSize = correctSet.size;
+      } else {
+        const correctSet = new Set(correctAnswers.map(normalize));
+        const studentSet = new Set(studentAnswer.map(normalize));
+        correctCount = [...studentSet].filter((a) => correctSet.has(a)).length;
+        hasWrong = [...studentSet].some((a) => !correctSet.has(a));
+        correctSize = correctSet.size;
+      }
 
-      const correctCount = [...studentSet].filter((a) =>
-        correctSet.has(a),
-      ).length;
-
-      const hasWrong = [...studentSet].some((a) => !correctSet.has(a));
-
-      if (correctCount === correctSet.size) return "Correct";
+      if (correctCount === correctSize) return "Correct";
       return "Incorrect";
     }
 
@@ -190,6 +235,8 @@ const evaluateQuestion = (question, studQuestion) => {
         natAnswerMode: question.natAnswerMode,
         rangeMin: question.rangeMin,
         rangeMax: question.rangeMax,
+        correctOptionIndexes: question.correctOptionIndexes,
+        studentAnswerIndexes: studQuestion.studentAnswerIndexes,
       })
     : "Skipped";
 
@@ -201,13 +248,28 @@ const evaluateQuestion = (question, studQuestion) => {
 };
 
 const calculateMarks = (question, studQuestion, positiveMark, negativeMark) => {
-  const { questionType, correctAnswers, isNumericAnswer, natAnswerMode, rangeMin, rangeMax } =
-    question;
+  const {
+    questionType,
+    correctAnswers,
+    isNumericAnswer,
+    natAnswerMode,
+    rangeMin,
+    rangeMax,
+    correctOptionIndexes,
+  } = question;
   const studentAnswer = studQuestion.studentAnswer;
+  const studentAnswerIndexes = studQuestion.studentAnswerIndexes;
+
+  // See the matching comment in getAnswerStatus: a blank-text MCQ/MSQ
+  // option is a legitimate answer once the student picked an index for it,
+  // and must not be mistaken for "no answer" just because its text is "".
+  const hasIndexAnswer =
+    Array.isArray(studentAnswerIndexes) && studentAnswerIndexes.length > 0;
 
   if (
-    !studentAnswer ||
-    (Array.isArray(studentAnswer) && studentAnswer.length === 0)
+    !hasIndexAnswer &&
+    (!studentAnswer ||
+      (Array.isArray(studentAnswer) && studentAnswer.length === 0))
   ) {
     return 0;
   }
@@ -216,9 +278,9 @@ const calculateMarks = (question, studQuestion, positiveMark, negativeMark) => {
 
   switch (questionType) {
     case "MCQ": {
-      const isCorrect = correctAnswers
-        .map(normalize)
-        .includes(normalize(studentAnswer));
+      const isCorrect = hasIndexIdentity(correctOptionIndexes, studentAnswerIndexes)
+        ? isMcqCorrectByIndex(correctOptionIndexes, studentAnswerIndexes)
+        : correctAnswers.map(normalize).includes(normalize(studentAnswer));
       return isCorrect ? positiveMark : -negativeMark;
     }
 
@@ -237,16 +299,25 @@ const calculateMarks = (question, studQuestion, positiveMark, negativeMark) => {
     }
 
     case "MSQ": {
-      const correctSet = new Set(correctAnswers.map(normalize));
-      const studentSet = new Set(studentAnswer.map(normalize));
+      let correctCount, correctSize, hasWrong;
+      if (hasIndexIdentity(correctOptionIndexes, studentAnswerIndexes)) {
+        const { correctSet, studentSet } = getMsqIndexSets(
+          correctOptionIndexes,
+          studentAnswerIndexes,
+        );
+        hasWrong = [...studentSet].some((i) => !correctSet.has(i));
+        correctCount = [...studentSet].filter((i) => correctSet.has(i)).length;
+        correctSize = correctSet.size;
+      } else {
+        const correctSet = new Set(correctAnswers.map(normalize));
+        const studentSet = new Set(studentAnswer.map(normalize));
+        hasWrong = [...studentSet].some((a) => !correctSet.has(a));
+        correctCount = [...studentSet].filter((a) => correctSet.has(a)).length;
+        correctSize = correctSet.size;
+      }
 
-      const hasWrong = [...studentSet].some((a) => !correctSet.has(a));
-      const correctCount = [...studentSet].filter((a) =>
-        correctSet.has(a),
-      ).length;
-
-      if (!hasWrong && correctCount === correctSet.size) {
-        return (correctCount / correctSet.size) * positiveMark;
+      if (!hasWrong && correctCount === correctSize) {
+        return (correctCount / correctSize) * positiveMark;
       }
       return 0;
     }
@@ -377,6 +448,9 @@ module.exports = {
   evaluateQuestion,
   getAnswerStatus,
   calculateMarks,
+  hasIndexIdentity,
+  isMcqCorrectByIndex,
+  getMsqIndexSets,
   parseNumericAnswer,
   getMarksByLevel,
   resolveQuestionMarks,

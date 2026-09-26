@@ -10,12 +10,65 @@ const { createNotification } = require("./notificationController");
 const { regradeExamSubmissions } = require("../utils/regradeHelper");
 
 /**
+ * For MCQ/MSQ: sanitize the index-based `correctOptionIndexes` — bounds-
+ * checked against the (possibly just-resolved) options array, deduplicated,
+ * integers only. Returns `undefined` (never `[]`) when there's no usable
+ * index data, so the question is correctly treated as "no index identity"
+ * everywhere downstream (grading, export, UI) and falls back to the legacy
+ * text-based `correctAnswers` comparison instead of "explicitly zero
+ * correct options." `resolvedOptions` lets callers pass the options array
+ * that will actually be saved (which, on update, may fall back to the
+ * existing question's options when the request omits `options`).
+ */
+const sanitizeCorrectOptionIndexes = (question, resolvedOptions) => {
+  const { questionType, correctOptionIndexes } = question;
+  if (
+    (questionType !== "MCQ" && questionType !== "MSQ") ||
+    !Array.isArray(resolvedOptions) ||
+    !Array.isArray(correctOptionIndexes) ||
+    correctOptionIndexes.length === 0
+  ) {
+    return undefined;
+  }
+
+  const validIndexes = [
+    ...new Set(
+      correctOptionIndexes.filter(
+        (i) => Number.isInteger(i) && i >= 0 && i < resolvedOptions.length,
+      ),
+    ),
+  ];
+
+  return validIndexes.length > 0 ? validIndexes : undefined;
+};
+
+/**
  * For MCQ/MSQ: ensure correctAnswers contains only values
  * that exist in the options array. Map labels like "A" to the
  * matching option. Remove duplicates.
+ *
+ * Preferred path: when the question carries usable `correctOptionIndexes`
+ * (see sanitizeCorrectOptionIndexes above), correctAnswers is rebuilt as a
+ * pure TEXT MIRROR of those indexes, read straight off the options array.
+ * This is what fixes the case reported in production: an MCQ/MSQ question
+ * whose options are all image-only (blank text) previously had its
+ * correct-answer identity resolved purely by TEXT, which collided whenever
+ * more than one option shared the same (blank) text — every option lit up
+ * as "correct" in the builder, and worse, the resolved blank-text answer
+ * used to be silently dropped by a `.filter(Boolean)` at the end of this
+ * function, making the question grade as always-Incorrect for every
+ * student once actually saved. The index-based mirror can't collide (each
+ * option has a unique position) and never produces an empty string that
+ * looks falsy, so neither failure mode can happen when index data exists.
+ *
+ * Legacy fallback (no correctOptionIndexes yet — every question saved
+ * before this fix): resolves each stored TEXT value against options,
+ * unchanged from before, except the trailing filter now only discards a
+ * genuinely-unresolved label, not a legitimately-matched blank string.
  */
-const sanitizeCorrectAnswers = (question) => {
-  const { questionType, options, correctAnswers } = question;
+const sanitizeCorrectAnswers = (question, resolvedOptions) => {
+  const { questionType, correctAnswers } = question;
+  const options = resolvedOptions ?? question.options;
   if (
     (questionType !== "MCQ" && questionType !== "MSQ") ||
     !Array.isArray(options) ||
@@ -24,11 +77,23 @@ const sanitizeCorrectAnswers = (question) => {
     return correctAnswers || [];
   }
 
+  const sanitizedIndexes = sanitizeCorrectOptionIndexes(question, options);
+  if (sanitizedIndexes) {
+    return [
+      ...new Set(
+        sanitizedIndexes.map((i) => {
+          const opt = options[i];
+          return typeof opt === "object" && opt !== null ? opt.text ?? "" : opt ?? "";
+        }),
+      ),
+    ];
+  }
+
   const resolved = correctAnswers
     .map((ans) => {
       if (typeof ans !== "string") return null;
       const trimmed = ans.trim();
-      
+
       // Direct match
       const exactMatch = options.find((opt) => {
         const text = typeof opt === "object" && opt !== null ? opt.text : opt;
@@ -44,9 +109,13 @@ const sanitizeCorrectAnswers = (question) => {
       if (labelMatch) {
         return typeof labelMatch === "object" && labelMatch !== null ? labelMatch.text : labelMatch;
       }
+      // Genuinely unmatched (label doesn't resolve to any option) — drop it.
       return null;
     })
-    .filter(Boolean);
+    // Previously `.filter(Boolean)`, which also silently dropped a
+    // legitimately-resolved blank-text ("") correct answer — see the bug
+    // note above. Only drop entries that are genuinely unresolved (null).
+    .filter((v) => v !== null);
 
   // Deduplicate
   return [...new Set(resolved)];
@@ -161,7 +230,8 @@ const createExam = async (req, res) => {
           questionType: question.questionType,
           questionText: question.questionText,
           options: question.options,
-          correctAnswers: sanitizeCorrectAnswers(question),
+          correctAnswers: sanitizeCorrectAnswers(question, question.options),
+          correctOptionIndexes: sanitizeCorrectOptionIndexes(question, question.options),
           // Bug fix: this was previously dropped on create — every
           // freshly-created question silently lost its "Numeric answer
           // (NAT-style)" checkbox state and fell back to the schema
@@ -501,7 +571,14 @@ const updateExam = async (req, res) => {
                 negativeMark: question.negativeMark ?? null,
                 duration: question.duration ?? null,
                 options: question.options ?? existingQuestion.options,
-                correctAnswers: sanitizeCorrectAnswers(question),
+                correctAnswers: sanitizeCorrectAnswers(
+                  question,
+                  question.options ?? existingQuestion.options,
+                ),
+                correctOptionIndexes: sanitizeCorrectOptionIndexes(
+                  question,
+                  question.options ?? existingQuestion.options,
+                ),
                 // Bug fix: this was previously dropped on update too — even
                 // re-editing an existing question and ticking "Numeric
                 // answer (NAT-style)" never actually saved the change.
@@ -528,7 +605,8 @@ const updateExam = async (req, res) => {
                 questionType: question.questionType,
                 questionText: question.questionText,
                 options: question.options,
-                correctAnswers: sanitizeCorrectAnswers(question),
+                correctAnswers: sanitizeCorrectAnswers(question, question.options),
+                correctOptionIndexes: sanitizeCorrectOptionIndexes(question, question.options),
                 isNumericAnswer: !!question.isNumericAnswer,
                 ...resolveNatRangeFields(question),
                 image: question.image,

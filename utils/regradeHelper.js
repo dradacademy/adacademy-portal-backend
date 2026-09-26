@@ -108,12 +108,21 @@ const regradeExamSubmissions = async (examId) => {
       if (!question) return studQuestion;
 
       const studentAnswer = studQuestion.studentAnswer;
-      const hasAnswer = !(
-        studentAnswer === null ||
-        studentAnswer === undefined ||
-        studentAnswer === "" ||
-        (Array.isArray(studentAnswer) && studentAnswer.length === 0)
-      );
+      // A blank-text MCQ/MSQ option (image-only option) is a legitimate
+      // answer once the student picked an index for it — don't let the
+      // "no text answer" check below mistake that for a skip. See the
+      // matching comment in ExamSubmissionHelper's getAnswerStatus.
+      const hasIndexAnswer =
+        Array.isArray(studQuestion.studentAnswerIndexes) &&
+        studQuestion.studentAnswerIndexes.length > 0;
+      const hasAnswer =
+        hasIndexAnswer ||
+        !(
+          studentAnswer === null ||
+          studentAnswer === undefined ||
+          studentAnswer === "" ||
+          (Array.isArray(studentAnswer) && studentAnswer.length === 0)
+        );
 
       const status = hasAnswer
         ? getAnswerStatus({
@@ -124,6 +133,8 @@ const regradeExamSubmissions = async (examId) => {
             natAnswerMode: question.natAnswerMode,
             rangeMin: question.rangeMin,
             rangeMax: question.rangeMax,
+            correctOptionIndexes: question.correctOptionIndexes,
+            studentAnswerIndexes: studQuestion.studentAnswerIndexes,
           })
         : "Skipped";
 

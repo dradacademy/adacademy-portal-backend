@@ -29,6 +29,20 @@ const ExamSubmissionSchema = new mongoose.Schema(
           type: mongoose.Schema.Types.Mixed, // Supports multiple answer types
           // required: true,
         },
+        // Index-based identity for the option(s) the student actually
+        // clicked on an MCQ/MSQ question, parallel to (and preferred over)
+        // the text-based `studentAnswer` above — see the matching comment on
+        // Question.correctOptionIndexes for why this exists (duplicate/blank
+        // option text can't be told apart by comparing text). Mongoose drops
+        // any field not declared on a subdocument schema, so this MUST be
+        // listed here explicitly to persist. `undefined`/absent for every
+        // submission recorded before this field existed, and for non-MCQ/MSQ
+        // answers — grading and display fall back to text-based comparison
+        // whenever it's missing on either side.
+        studentAnswerIndexes: {
+          type: [Number],
+          default: undefined,
+        },
         correctAnswer: {
           type: mongoose.Schema.Types.Mixed, // Supports multiple answer types
         },

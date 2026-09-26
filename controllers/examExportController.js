@@ -50,6 +50,18 @@ const formatExportDate = (value) => {
   return d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
 };
 
+// A NAT range-mode question ("any value in between counts as correct")
+// has no meaningful `correctAnswers` list to print — its acceptable answer
+// is the [rangeMin, rangeMax] window itself. Shared by both the PDF and
+// Word export paths so the two formats can never drift on how a range
+// question's answer line reads.
+const formatAcceptableAnswer = (q) => {
+  if (q.natAnswerMode === "range" && q.rangeMin != null && q.rangeMax != null) {
+    return `${q.rangeMin} to ${q.rangeMax} (any value in this range)`;
+  }
+  return (q.correctAnswers || []).join(", ");
+};
+
 const formatDuration = (totalSeconds) => {
   const totalMinutes = Math.max(1, Math.round(totalSeconds / 60));
   if (totalMinutes < 60) return `${totalMinutes} minute${totalMinutes === 1 ? "" : "s"}`;
@@ -60,6 +72,20 @@ const formatDuration = (totalSeconds) => {
 
 const optionTextOf = (opt) => (typeof opt === "object" && opt !== null ? opt.text : opt);
 const optionImageOf = (opt) => (typeof opt === "object" && opt !== null ? opt.image : null);
+
+// Whether the option at `optIdx` is a correct answer for MCQ/MSQ question
+// `q`. Prefers `q.correctOptionIndexes` (index-based identity) when present
+// — matching by option TEXT alone (the legacy fallback) mismarks every
+// option that shares identical/blank text, the routine case for
+// image-only options, since there's then no way to tell which one the
+// admin actually marked correct. Falls back to the text-based comparison
+// for any question saved before correctOptionIndexes existed.
+const isOptionCorrect = (q, opt, optIdx) => {
+  if (Array.isArray(q.correctOptionIndexes) && q.correctOptionIndexes.length > 0) {
+    return q.correctOptionIndexes.includes(optIdx);
+  }
+  return (q.correctAnswers || []).includes(optionTextOf(opt));
+};
 
 // Question/option/answer-key images are Cloudinary URLs uploaded straight
 // from the browser (see CreateExamAdminPage.jsx's uploadToCloudinary) —
@@ -302,7 +328,7 @@ const renderExamPdf = (res, data) => {
       ? (q.options || []).map((opt, optIdx) => {
           const letter = String.fromCharCode(65 + optIdx);
           const text = stripLatexForPrint(optionTextOf(opt) || "");
-          const isCorrect = (q.correctAnswers || []).includes(optionTextOf(opt));
+          const isCorrect = isOptionCorrect(q, opt, optIdx);
           const imgUrl = optionImageOf(opt);
           const imgBuf = imgUrl ? imageBuffers.get(imgUrl) : null;
           const imgFit = getPdfCompatibleFit(imgBuf, contentWidth - 20, PDF_OPTION_IMG_MAX);
@@ -311,7 +337,7 @@ const renderExamPdf = (res, data) => {
       : [];
 
     const answerLine = !isChoice
-      ? `${q.questionType === "Short Answer" ? "Keyword(s)" : "Acceptable Answer(s)"}: ${(q.correctAnswers || []).join(", ")}`
+      ? `${q.questionType === "Short Answer" ? "Keyword(s)" : "Acceptable Answer(s)"}: ${formatAcceptableAnswer(q)}`
       : null;
 
     const explanationText = htmlToPlainText(q.answerKeyText);
@@ -566,7 +592,7 @@ const buildExamDocx = (data) => {
       (q.options || []).forEach((opt, optIdx) => {
         const letter = String.fromCharCode(65 + optIdx);
         const text = stripLatexForPrint(optionTextOf(opt) || "");
-        const isCorrect = (q.correctAnswers || []).includes(optionTextOf(opt));
+        const isCorrect = isOptionCorrect(q, opt, optIdx);
         children.push(
           new Paragraph({
             keepNext: true,
@@ -599,7 +625,7 @@ const buildExamDocx = (data) => {
               color: "166534",
               size: 20,
             }),
-            new TextRun({ text: (q.correctAnswers || []).join(", "), color: "166534", size: 20 }),
+            new TextRun({ text: formatAcceptableAnswer(q), color: "166534", size: 20 }),
           ],
         }),
       );
