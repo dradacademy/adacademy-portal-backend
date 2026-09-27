@@ -210,6 +210,20 @@ const getAnswerStatus = ({
     }
 
     case "Short Answer": {
+      // A GATE-style numeric Short Answer question (e.g. "the factor of
+      // safety... is") can be flagged range-graded by the admin exactly
+      // like a numeric Fill in the Blanks question — see the matching
+      // comment on isNumericAnswerCorrect above. Checked first because a
+      // range-mode question's `correctAnswers` is just one display keyword
+      // (e.g. "1.10"), which the substring match below would wrongly reject
+      // a mathematically-equivalent, in-tolerance answer like "1.09" or
+      // "1.11" for.
+      if (natAnswerMode === "range") {
+        return isNumericInRange(rangeMin, rangeMax, studentAnswer)
+          ? "Correct"
+          : "Incorrect";
+      }
+
       const matchCount = correctAnswers.filter((word) =>
         studentAnswer.toLowerCase().includes(word.toLowerCase()),
       ).length;
@@ -323,6 +337,13 @@ const calculateMarks = (question, studQuestion, positiveMark, negativeMark) => {
     }
 
     case "Short Answer": {
+      // See the matching comment in getAnswerStatus above.
+      if (natAnswerMode === "range") {
+        return isNumericInRange(rangeMin, rangeMax, studentAnswer)
+          ? positiveMark
+          : 0;
+      }
+
       const matchCount = correctAnswers.filter((word) =>
         studentAnswer.toLowerCase().includes(word.toLowerCase()),
       ).length;
@@ -344,11 +365,51 @@ const getMarksByLevel = (mark, level) => {
   };
 };
 
+// Negative-mark fallback for a question whose own `negativeMark` is blank.
+// The naive version of this (just use the question's *assigned* level's
+// negative default) silently disagrees with the question's own `marks`
+// whenever `marks` was overridden independently of `level` — e.g. a PDF
+// import that read "[1 Mark]"/"[2 Marks]" straight off the source document
+// (setting `marks` per question, correctly) but had no basis to judge
+// difficulty and defaulted every question to the same `level` (per its own
+// instructions, since the source never stated one) — so a 1-mark and a
+// 2-mark question both being Level 2 meant both fell back to the SAME
+// negative value, regardless of their different marks. Real exam
+// convention (e.g. GATE's -1/3 for 1-mark, -2/3 for 2-mark) ties negative
+// marking to the mark value, not to an unrelated difficulty label, so:
+//   1. If the question's own assigned level already carries this exact
+//      marks value by default, nothing is inconsistent — use that level's
+//      negative, exactly as before (the overwhelming majority of
+//      questions, where marks was never overridden, hit this path and see
+//      zero behavior change).
+//   2. Otherwise (marks was overridden to a value its assigned level
+//      doesn't itself default to), search the other configured levels for
+//      one whose default marks matches, and use ITS negative instead, so
+//      the negative penalty stays consistent with the marks actually
+//      shown for this question.
+//   3. If no level's default marks matches at all, fall back to the
+//      assigned level's negative as a last resort (same as before this
+//      fix existed) rather than showing nothing.
+const resolveNegativeMarkFallback = (effectiveMarks, level, markConfig) => {
+  const ownLevelMarks = markConfig[`level${level}Mark`];
+  if (ownLevelMarks === effectiveMarks) {
+    return markConfig[`level${level}NegativeMark`];
+  }
+  for (let lvl = 1; lvl <= 4; lvl += 1) {
+    if (markConfig[`level${lvl}Mark`] === effectiveMarks) {
+      return markConfig[`level${lvl}NegativeMark`];
+    }
+  }
+  return markConfig[`level${level}NegativeMark`];
+};
+
 /**
  * Resolve the effective positive/negative marks for a single question.
  * A question's own `marks`/`negativeMark` (set individually by the admin)
  * take priority; when either is null/undefined, fall back to the global
- * level-based Mark config for that question's level.
+ * level-based Mark config for that question's level — the negative-mark
+ * fallback specifically also accounts for a `marks` override that disagrees
+ * with the assigned level, see resolveNegativeMarkFallback above.
  * @param {Object} question - Question doc/subdoc (needs level, marks, negativeMark)
  * @param {Object} markConfig - Global Mark config (level1Mark, level1NegativeMark, ...)
  * @returns {{positive: Number, negative: Number}}
@@ -358,10 +419,14 @@ const resolveQuestionMarks = (question, markConfig) => {
     ? getMarksByLevel(markConfig, question.level)
     : { positive: 0, negative: 0 };
 
-  return {
-    positive: question.marks ?? fallback.positive,
-    negative: question.negativeMark ?? fallback.negative,
-  };
+  const positive = question.marks ?? fallback.positive;
+  const negative =
+    question.negativeMark ??
+    (markConfig
+      ? resolveNegativeMarkFallback(positive, question.level, markConfig)
+      : fallback.negative);
+
+  return { positive, negative };
 };
 
 /**

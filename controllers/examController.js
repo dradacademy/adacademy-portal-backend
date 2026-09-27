@@ -8,6 +8,7 @@ const reviewModel = require("../models/ReviewModel");
 const { retryTransaction } = require("../utils/transactionHelper");
 const { createNotification } = require("./notificationController");
 const { regradeExamSubmissions } = require("../utils/regradeHelper");
+const { parseNumericAnswer } = require("../utils/ExamSubmissionHelper");
 
 /**
  * For MCQ/MSQ: sanitize the index-based `correctOptionIndexes` — bounds-
@@ -978,6 +979,159 @@ const regradeExam = async (req, res) => {
   }
 };
 
+// Matches a numeric tolerance range stated in prose, e.g. "Range: 1.09 to
+// 1.11", "range 3.10 - 3.12", "(0.69 to 0.71)". Deliberately permissive on
+// the separator (to/-/–/—) since both AI-generated (PDF import) and
+// manually-typed answer explanations phrase this differently.
+const RANGE_TEXT_PATTERN =
+  /(-?\d+(?:\.\d+)?)\s*(?:to|-|–|—)\s*(-?\d+(?:\.\d+)?)/i;
+
+/**
+ * Pulls a stated tolerance range out of a question's answerKeyText, e.g.
+ * "1.10 (Range: 1.09 to 1.11)" → { rangeMin: "1.09", rangeMax: "1.11" }.
+ * Strips HTML first (answerKeyText is routinely Quill-authored rich text),
+ * and — when the word "range" appears — only searches from that point
+ * onward so a coincidental "1 to 2" earlier in a free-text explanation
+ * isn't mistaken for the answer tolerance. Returns null when no usable
+ * range can be found, or when the two numbers are out of order.
+ */
+const extractRangeFromAnswerKeyText = (answerKeyText) => {
+  if (typeof answerKeyText !== "string" || !answerKeyText.trim()) return null;
+
+  const plainText = answerKeyText.replace(/<[^>]*>/g, " ");
+  const rangeLabelIndex = plainText.search(/range/i);
+  const searchText =
+    rangeLabelIndex >= 0 ? plainText.slice(rangeLabelIndex) : plainText;
+
+  const match = searchText.match(RANGE_TEXT_PATTERN);
+  if (!match) return null;
+
+  const min = parseFloat(match[1]);
+  const max = parseFloat(match[2]);
+  if (!Number.isFinite(min) || !Number.isFinite(max) || min > max) {
+    return null;
+  }
+
+  return { rangeMin: match[1], rangeMax: match[2] };
+};
+
+/**
+ * One-time (safely re-runnable) backfill for "Short Answer" questions that
+ * were created before Short Answer supported structured range-mode grading
+ * (see ExamSubmissionHelper.js's getAnswerStatus/calculateMarks). A GATE-
+ * style numerical question entered as Short Answer often already states an
+ * acceptable range in its answer explanation ("1.10 (Range: 1.09 to
+ * 1.11)"), but that text is purely decorative prose with no structural
+ * connection to grading — grading only ever compared the student's answer
+ * against the single "Expected Keyword" via exact substring match, so an
+ * in-range-but-not-identical answer (e.g. "1.09") was wrongly marked
+ * Incorrect.
+ *
+ * This finds every affected question (Short Answer, not already in range
+ * mode, exactly one keyword that is itself a plain number), extracts the
+ * stated range from its answer explanation, sets natAnswerMode/rangeMin/
+ * rangeMax on it, then re-grades every already-completed submission for
+ * every exam that references it — so a single admin action corrects both
+ * "present" (future) grading AND "previous" (already-completed) attempts,
+ * without requiring the admin to manually re-open and re-save each
+ * question in the exam builder one at a time.
+ *
+ * Deliberately conservative: a question with zero or multiple keywords, a
+ * non-numeric keyword, or no parseable "X to Y" range in its explanation
+ * text is left completely untouched (reported back as skipped) rather than
+ * guessed at.
+ */
+const backfillShortAnswerRanges = async (req, res) => {
+  try {
+    const candidates = await questionModel.find({
+      questionType: "Short Answer",
+      natAnswerMode: { $ne: "range" },
+      answerKeyText: { $exists: true, $ne: null, $ne: "" },
+    });
+
+    const updatedQuestionIds = [];
+    let skippedCount = 0;
+
+    for (const question of candidates) {
+      // Range mode only makes sense for a single numeric expected value —
+      // a genuinely free-text Short Answer question, or one with several
+      // acceptable keywords, is left alone entirely.
+      if (
+        !Array.isArray(question.correctAnswers) ||
+        question.correctAnswers.length !== 1
+      ) {
+        skippedCount += 1;
+        continue;
+      }
+      if (parseNumericAnswer(question.correctAnswers[0]) === null) {
+        skippedCount += 1;
+        continue;
+      }
+
+      const range = extractRangeFromAnswerKeyText(question.answerKeyText);
+      if (!range) {
+        skippedCount += 1;
+        continue;
+      }
+
+      question.natAnswerMode = "range";
+      question.rangeMin = range.rangeMin;
+      question.rangeMax = range.rangeMax;
+      await question.save();
+      updatedQuestionIds.push(question._id);
+    }
+
+    // Find every exam referencing any of the just-updated questions — a
+    // question can be pulled into an exam via straight selection, the
+    // random-pick pool, or a question set, so all three must be checked.
+    let examsRegraded = 0;
+    let totalChecked = 0;
+    let marksChanged = 0;
+    let passChanged = 0;
+
+    if (updatedQuestionIds.length > 0) {
+      const affectedExams = await examModel
+        .find({
+          $or: [
+            { questions: { $in: updatedQuestionIds } },
+            { poolQuestions: { $in: updatedQuestionIds } },
+            { "questionSets.questions": { $in: updatedQuestionIds } },
+          ],
+        })
+        .select("_id");
+
+      for (const exam of affectedExams) {
+        const examRegrade = await regradeExamSubmissions(exam._id);
+        examsRegraded += 1;
+        totalChecked += examRegrade.totalChecked;
+        marksChanged += examRegrade.marksChanged;
+        passChanged += examRegrade.passChanged;
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      message:
+        updatedQuestionIds.length > 0
+          ? `Updated ${updatedQuestionIds.length} Short Answer question(s) to range-mode grading. Re-graded ${examsRegraded} exam(s): ${marksChanged} mark(s) updated, ${passChanged} pass/fail status(es) changed.`
+          : `No Short Answer questions needed updating (${skippedCount} checked and skipped — already range-mode, non-numeric, multi-keyword, or no range stated in the answer explanation).`,
+      updatedQuestionCount: updatedQuestionIds.length,
+      skippedCount,
+      examsRegraded,
+      totalChecked,
+      marksChanged,
+      passChanged,
+    });
+  } catch (error) {
+    console.error("backfillShortAnswerRanges error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to backfill Short Answer range grading",
+      error: error.message,
+    });
+  }
+};
+
 module.exports = {
   createExam,
   getAllExams,
@@ -986,4 +1140,5 @@ module.exports = {
   getExamById,
   deleteExam,
   regradeExam,
+  backfillShortAnswerRanges,
 };

@@ -7,6 +7,7 @@ const {
   getExamById,
   updateShuffleQuestion,
   regradeExam,
+  backfillShortAnswerRanges,
 } = require("../controllers/examController");
 const { exportExamPdf, exportExamWord } = require("../controllers/examExportController");
 const {
@@ -32,5 +33,17 @@ router.delete("/delete/:id", verifyToken, authorizeRoles("admin"), deleteExam);
 // On-demand: re-grade every already-completed submission for this exam
 // against its current answer key/marks/pass percentage (see regradeHelper).
 router.post("/:id/regrade", verifyToken, authorizeRoles("admin"), regradeExam);
+// One-time (safely re-runnable) backfill: finds Short Answer questions
+// whose answer explanation already states a numeric tolerance range but
+// were created before Short Answer supported structured range-mode
+// grading, sets their range fields, and re-grades every affected exam's
+// already-completed submissions. See examController.js's
+// backfillShortAnswerRanges for details.
+router.post(
+  "/short-answer-range-backfill",
+  verifyToken,
+  authorizeRoles("admin"),
+  backfillShortAnswerRanges
+);
 
 module.exports = router;

@@ -60,17 +60,25 @@ const QuestionSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
-    // NAT range-grading support (only meaningful when isNumericAnswer is
-    // true): when natAnswerMode is "range", any submitted numeric value
-    // within [rangeMin, rangeMax] inclusive is graded correct instead of
-    // requiring an exact match against `correctAnswers` — e.g. a range of
-    // "10 to 15" accepts 10, 12.5, and 15 all as correct. rangeMin/rangeMax
-    // are stored as strings (not Number) so the same scientific/power
-    // notations already accepted for exact NAT answers ("1e-3", "10^-7",
-    // ...) — see ExamSubmissionHelper.js's parseNumericAnswer — work here
-    // too. Left null whenever natAnswerMode is "exact" (the default), so an
-    // exact-mode question never carries stale range data from an earlier
-    // edit.
+    // NAT range-grading support: when natAnswerMode is "range", any
+    // submitted numeric value within [rangeMin, rangeMax] inclusive is
+    // graded correct instead of requiring an exact match against
+    // `correctAnswers` — e.g. a range of "10 to 15" accepts 10, 12.5, and 15
+    // all as correct. Originally meaningful only for a numeric ("Fill in
+    // the Blanks" + isNumericAnswer) question; also used, as of the
+    // negative-mark/answer-key-formatting round, by a "Short Answer"
+    // question whose single-value numeric answer needs a rounding-tolerance
+    // range instead of exact keyword matching (see ExamSubmissionHelper.js's
+    // getAnswerStatus/calculateMarks "Short Answer" case) — a GATE-style
+    // numerical question is routinely entered as Short Answer rather than
+    // Fill in the Blanks, and its official answer key often states an
+    // acceptable range like "1.09 to 1.11" for exactly this reason.
+    // rangeMin/rangeMax are stored as strings (not Number) so the same
+    // scientific/power notations already accepted for exact NAT answers
+    // ("1e-3", "10^-7", ...) — see ExamSubmissionHelper.js's
+    // parseNumericAnswer — work here too. Left null whenever natAnswerMode
+    // is "exact" (the default), so an exact-mode question never carries
+    // stale range data from an earlier edit.
     natAnswerMode: {
       type: String,
       enum: ["exact", "range"],
