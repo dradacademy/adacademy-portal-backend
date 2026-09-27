@@ -980,11 +980,13 @@ const regradeExam = async (req, res) => {
 };
 
 // Matches a numeric tolerance range stated in prose, e.g. "Range: 1.09 to
-// 1.11", "range 3.10 - 3.12", "(0.69 to 0.71)". Deliberately permissive on
-// the separator (to/-/–/—) since both AI-generated (PDF import) and
-// manually-typed answer explanations phrase this differently.
+// 1.11", "range 3.10 - 3.12", "(0.69 to 0.71)", or with a unit repeated on
+// each number ("Range: 3.10 m to 3.12 m", "45 kN to 50 kN"). Deliberately
+// permissive on the separator (to/-/–/—) since both AI-generated (PDF
+// import) and manually-typed answer explanations phrase this differently,
+// and on an optional short unit token immediately after either number.
 const RANGE_TEXT_PATTERN =
-  /(-?\d+(?:\.\d+)?)\s*(?:to|-|–|—)\s*(-?\d+(?:\.\d+)?)/i;
+  /(-?\d+(?:\.\d+)?)\s*[a-zA-Z°%\/²³]{0,12}\s*(?:to|-|–|—)\s*(-?\d+(?:\.\d+)?)\s*[a-zA-Z°%\/²³]{0,12}/i;
 
 /**
  * Pulls a stated tolerance range out of a question's answerKeyText, e.g.
@@ -1050,7 +1052,27 @@ const backfillShortAnswerRanges = async (req, res) => {
     });
 
     const updatedQuestionIds = [];
-    let skippedCount = 0;
+    // Broken down by reason so the admin action can report exactly why a
+    // question was left untouched instead of one opaque total (a plain
+    // total gives no way to tell "nothing needed fixing" apart from "the
+    // range text just isn't being recognized").
+    let multiOrZeroKeywordSkipped = 0;
+    let nonNumericKeywordSkipped = 0;
+    let noRangeFoundSkipped = 0;
+    // A handful of concrete examples per skip reason, returned alongside
+    // the counts, so a skip that turns out to be a bug (e.g. a range
+    // phrasing the regex doesn't recognize) can be diagnosed directly from
+    // the response instead of needing raw database access.
+    const skippedSamples = [];
+    const pushSample = (question, reason, extra) => {
+      if (skippedSamples.length >= 10) return;
+      skippedSamples.push({
+        questionId: question._id,
+        reason,
+        correctAnswers: question.correctAnswers,
+        ...extra,
+      });
+    };
 
     for (const question of candidates) {
       // Range mode only makes sense for a single numeric expected value —
@@ -1060,17 +1082,24 @@ const backfillShortAnswerRanges = async (req, res) => {
         !Array.isArray(question.correctAnswers) ||
         question.correctAnswers.length !== 1
       ) {
-        skippedCount += 1;
+        multiOrZeroKeywordSkipped += 1;
+        pushSample(question, "multi-or-zero-keyword");
         continue;
       }
-      if (parseNumericAnswer(question.correctAnswers[0]) === null) {
-        skippedCount += 1;
+      // parseNumericAnswer returns NaN (never null) for an unparseable
+      // value — Number.isNaN is the correct check here.
+      if (Number.isNaN(parseNumericAnswer(question.correctAnswers[0]))) {
+        nonNumericKeywordSkipped += 1;
+        pushSample(question, "non-numeric-keyword");
         continue;
       }
 
       const range = extractRangeFromAnswerKeyText(question.answerKeyText);
       if (!range) {
-        skippedCount += 1;
+        noRangeFoundSkipped += 1;
+        pushSample(question, "no-range-found-in-explanation", {
+          answerKeyTextPreview: String(question.answerKeyText).slice(0, 300),
+        });
         continue;
       }
 
@@ -1080,6 +1109,9 @@ const backfillShortAnswerRanges = async (req, res) => {
       await question.save();
       updatedQuestionIds.push(question._id);
     }
+
+    const skippedCount =
+      multiOrZeroKeywordSkipped + nonNumericKeywordSkipped + noRangeFoundSkipped;
 
     // Find every exam referencing any of the just-updated questions — a
     // question can be pulled into an exam via straight selection, the
@@ -1113,10 +1145,20 @@ const backfillShortAnswerRanges = async (req, res) => {
       success: true,
       message:
         updatedQuestionIds.length > 0
-          ? `Updated ${updatedQuestionIds.length} Short Answer question(s) to range-mode grading. Re-graded ${examsRegraded} exam(s): ${marksChanged} mark(s) updated, ${passChanged} pass/fail status(es) changed.`
-          : `No Short Answer questions needed updating (${skippedCount} checked and skipped — already range-mode, non-numeric, multi-keyword, or no range stated in the answer explanation).`,
+          ? `Updated ${updatedQuestionIds.length} Short Answer question(s) to range-mode grading. Re-graded ${examsRegraded} exam(s): ${marksChanged} mark(s) updated, ${passChanged} pass/fail status(es) changed.${
+              skippedCount > 0
+                ? ` (${skippedCount} other question(s) skipped: ${multiOrZeroKeywordSkipped} multi/zero-keyword, ${nonNumericKeywordSkipped} non-numeric, ${noRangeFoundSkipped} no range found.)`
+                : ""
+            }`
+          : `No Short Answer questions needed updating (${skippedCount} checked and skipped — ${multiOrZeroKeywordSkipped} had zero/multiple expected keywords, ${nonNumericKeywordSkipped} had a non-numeric keyword, ${noRangeFoundSkipped} had no "X to Y" range found in their answer explanation).`,
       updatedQuestionCount: updatedQuestionIds.length,
       skippedCount,
+      skippedBreakdown: {
+        multiOrZeroKeyword: multiOrZeroKeywordSkipped,
+        nonNumericKeyword: nonNumericKeywordSkipped,
+        noRangeFoundInExplanation: noRangeFoundSkipped,
+      },
+      skippedSamples,
       examsRegraded,
       totalChecked,
       marksChanged,
