@@ -23,6 +23,14 @@ const getGeminiClient = () => {
 // writing (2026-09-28).
 const GEMINI_MODEL = process.env.GEMINI_PDF_MODEL || "gemini-2.5-flash";
 
+// A full question paper (especially one with many questions, long option
+// lists, or a non-Latin script like Tamil, which tends to use more tokens
+// per character) can produce a large JSON response. 8192 output tokens was
+// found in practice to truncate mid-response on a real TNPSC paper, which
+// then failed to parse as JSON. Raised generously and made configurable in
+// case a future model has a different real ceiling.
+const GEMINI_PDF_MAX_OUTPUT_TOKENS = parseInt(process.env.GEMINI_PDF_MAX_OUTPUT_TOKENS, 10) || 65536;
+
 // Gemini's structured-output schema uses the SDK's own Type enum (rather
 // than raw "object"/"string" strings) so the correct casing is guaranteed
 // regardless of what the underlying REST API expects — this is the
@@ -237,7 +245,7 @@ const extractQuestionsFromPdf = async (req, res) => {
         config: {
           responseMimeType: "application/json",
           responseSchema: EXTRACTION_RESPONSE_SCHEMA,
-          maxOutputTokens: 8192,
+          maxOutputTokens: GEMINI_PDF_MAX_OUTPUT_TOKENS,
         },
       });
     } catch (apiError) {
@@ -249,6 +257,23 @@ const extractQuestionsFromPdf = async (req, res) => {
       return res.status(502).json({
         success: false,
         message: describeGeminiError(apiError),
+      });
+    }
+
+    // A response cut short by the output-token cap is the most common real
+    // cause of unparseable JSON (a long/dense document, e.g. many questions
+    // or a non-Latin script, produces more output than the cap allows) — a
+    // distinct, actionable case worth telling the admin about specifically,
+    // rather than lumping it into the generic parse-failure message below.
+    const finishReason = response?.candidates?.[0]?.finishReason;
+    if (finishReason === "MAX_TOKENS") {
+      console.error(
+        `Gemini response truncated at the output-token limit (${GEMINI_PDF_MAX_OUTPUT_TOKENS}) during PDF extraction.`,
+      );
+      return res.status(502).json({
+        success: false,
+        message:
+          "This document produced more content than the extraction service could return at once. Try splitting the PDF into smaller sections (e.g. by subject or a portion of the questions) and importing each separately.",
       });
     }
 
