@@ -1,91 +1,96 @@
-const Anthropic = require("@anthropic-ai/sdk");
+const { GoogleGenAI, Type } = require("@google/genai");
 
-// Lazily constructed so a missing ANTHROPIC_API_KEY doesn't crash the whole
+// Lazily constructed so a missing GEMINI_API_KEY doesn't crash the whole
 // server on boot — it only surfaces as a clean error the first time this
 // endpoint is actually called.
-let anthropicClient = null;
-const getAnthropicClient = () => {
-  if (!anthropicClient) {
-    if (!process.env.ANTHROPIC_API_KEY) {
-      const err = new Error("ANTHROPIC_API_KEY is not configured on the server.");
+let geminiClient = null;
+const getGeminiClient = () => {
+  if (!geminiClient) {
+    if (!process.env.GEMINI_API_KEY) {
+      const err = new Error("GEMINI_API_KEY is not configured on the server.");
       err.code = "MISSING_API_KEY";
       throw err;
     }
-    anthropicClient = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    geminiClient = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
   }
-  return anthropicClient;
+  return geminiClient;
 };
 
-const ANTHROPIC_MODEL = process.env.ANTHROPIC_PDF_MODEL || "claude-sonnet-4-5-20250929";
+// Configurable via env var so a retired/renamed model can be swapped without
+// a code change or redeploy — same pattern used elsewhere in this codebase
+// (e.g. ANTHROPIC_PDF_MODEL previously). "gemini-2.5-flash" is Google's
+// current free-tier-eligible model with native PDF understanding as of this
+// writing (2026-09-28).
+const GEMINI_MODEL = process.env.GEMINI_PDF_MODEL || "gemini-2.5-flash";
 
-const EXTRACT_QUESTIONS_TOOL = {
-  name: "extract_questions",
-  description:
-    "Return every exam question found in the PDF question paper, in the same order they appear in the document.",
-  input_schema: {
-    type: "object",
-    properties: {
-      questions: {
-        type: "array",
-        items: {
-          type: "object",
-          properties: {
-            questionType: {
-              type: "string",
-              enum: ["MCQ", "Fill in the Blanks", "MSQ", "Short Answer"],
-              description:
-                "MCQ = single correct option, MSQ = multiple correct options, Fill in the Blanks / Short Answer = no options.",
-            },
-            questionText: {
-              type: "string",
-              description:
-                "The exact question text, verbatim — do not paraphrase or summarize. Any math must be written as KaTeX-flavored LaTeX and every complete math expression must be wrapped in \\( \\) delimiters (e.g. \"What is \\(x^{2}\\) when \\(x=3\\)?\", \"the equation reduces to \\(\\frac{d^{2}H}{dz^{2}} = 0\\)\"). Use proper LaTeX constructs for compound expressions instead of ASCII shorthand — \\frac{a}{b} not a/b, \\sqrt{x} not sqrt(x), \\times not x for multiplication — so a whole expression parses as one unit rather than a chain of loose symbols. A fill-in-the-blank marker (e.g. ____) is plain text, never wrapped in math delimiters.",
-            },
-            options: {
-              type: "array",
-              items: { type: "string" },
-              description:
-                "Only for MCQ/MSQ — the answer options verbatim, in order. Omit entirely for Fill in the Blanks / Short Answer. Any math in an option must follow the exact same rule as questionText: KaTeX LaTeX wrapped in \\( \\) delimiters, real LaTeX constructs (\\frac, \\partial, \\sqrt, etc.), never raw Unicode math characters (no ², ³, ∂, √, × typed directly — always \\partial, \\sqrt{}, \\times inside \\( \\)). A short numeric or plain-text option like \"2\" or \"True\" needs no delimiters at all.",
-            },
-            correctAnswers: {
-              type: "array",
-              items: { type: "string" },
-              description:
-                "The correct answer(s). For MCQ/MSQ, use the exact option text of the correct option(s). If an answer key is not present in the document, make a best-effort guess and never leave this empty.",
-            },
-            level: {
-              type: "integer",
-              enum: [1, 2, 3, 4],
-              description:
-                "Best-effort difficulty level from 1 (easiest) to 4 (hardest). Default to 2 when genuinely ambiguous.",
-            },
-            marks: {
-              type: "number",
-              description:
-                "Positive marks for this question, only if explicitly stated in the document. Omit if unknown — omission is safe and falls back to a level-based default.",
-            },
-            negativeMark: {
-              type: "number",
-              description:
-                "Negative marks for a wrong answer, only if explicitly stated in the document. Omit if unknown.",
-            },
-            duration: {
-              type: "number",
-              description:
-                "Suggested time budget in seconds for this question, only if explicitly stated or strongly implied by the document. Omit if unknown.",
-            },
-            explanation: {
-              type: "string",
-              description:
-                "A step-by-step solution/explanation for the correct answer, if one is available anywhere in the source document(s) — printed right after the question, in an answer key/solutions section elsewhere in the same document, or in a separate answer-key document provided alongside the question paper. Matched to this question by its question number/order. Follow the same LaTeX math-delimiter rule as questionText when it contains formulas. Omit this field entirely if no explanation is available for this question — never invent one.",
-            },
-          },
-          required: ["questionType", "questionText", "correctAnswers", "level"],
-        },
-      },
+// Gemini's structured-output schema uses the SDK's own Type enum (rather
+// than raw "object"/"string" strings) so the correct casing is guaranteed
+// regardless of what the underlying REST API expects — this is the
+// officially recommended way to build a responseSchema with this SDK.
+const QUESTION_ITEM_SCHEMA = {
+  type: Type.OBJECT,
+  properties: {
+    questionType: {
+      type: Type.STRING,
+      enum: ["MCQ", "Fill in the Blanks", "MSQ", "Short Answer"],
+      description:
+        "MCQ = single correct option, MSQ = multiple correct options, Fill in the Blanks / Short Answer = no options.",
     },
-    required: ["questions"],
+    questionText: {
+      type: Type.STRING,
+      description:
+        "The exact question text, verbatim — do not paraphrase or summarize. Any math must be written as KaTeX-flavored LaTeX and every complete math expression must be wrapped in \\( \\) delimiters (e.g. \"What is \\(x^{2}\\) when \\(x=3\\)?\", \"the equation reduces to \\(\\frac{d^{2}H}{dz^{2}} = 0\\)\"). Use proper LaTeX constructs for compound expressions instead of ASCII shorthand — \\frac{a}{b} not a/b, \\sqrt{x} not sqrt(x), \\times not x for multiplication — so a whole expression parses as one unit rather than a chain of loose symbols. A fill-in-the-blank marker (e.g. ____) is plain text, never wrapped in math delimiters.",
+    },
+    options: {
+      type: Type.ARRAY,
+      items: { type: Type.STRING },
+      description:
+        "Only for MCQ/MSQ — the answer options verbatim, in order. Omit entirely for Fill in the Blanks / Short Answer. Any math in an option must follow the exact same rule as questionText: KaTeX LaTeX wrapped in \\( \\) delimiters, real LaTeX constructs (\\frac, \\partial, \\sqrt, etc.), never raw Unicode math characters (no ², ³, ∂, √, × typed directly — always \\partial, \\sqrt{}, \\times inside \\( \\)). A short numeric or plain-text option like \"2\" or \"True\" needs no delimiters at all.",
+    },
+    correctAnswers: {
+      type: Type.ARRAY,
+      items: { type: Type.STRING },
+      description:
+        "The correct answer(s). For MCQ/MSQ, use the exact option text of the correct option(s). If an answer key is not present in the document, make a best-effort guess and never leave this empty.",
+    },
+    level: {
+      type: Type.INTEGER,
+      description:
+        "Best-effort difficulty level from 1 (easiest) to 4 (hardest). Must be exactly 1, 2, 3, or 4. Default to 2 when genuinely ambiguous.",
+    },
+    marks: {
+      type: Type.NUMBER,
+      description:
+        "Positive marks for this question, only if explicitly stated in the document. Omit if unknown — omission is safe and falls back to a level-based default.",
+    },
+    negativeMark: {
+      type: Type.NUMBER,
+      description:
+        "Negative marks for a wrong answer, only if explicitly stated in the document. Omit if unknown.",
+    },
+    duration: {
+      type: Type.NUMBER,
+      description:
+        "Suggested time budget in seconds for this question, only if explicitly stated or strongly implied by the document. Omit if unknown.",
+    },
+    explanation: {
+      type: Type.STRING,
+      description:
+        "A step-by-step solution/explanation for the correct answer, if one is available anywhere in the source document(s) — printed right after the question, in an answer key/solutions section elsewhere in the same document, or in a separate answer-key document provided alongside the question paper. Matched to this question by its question number/order. Follow the same LaTeX math-delimiter rule as questionText when it contains formulas. Omit this field entirely if no explanation is available for this question — never invent one.",
+    },
   },
+  required: ["questionType", "questionText", "correctAnswers", "level"],
+};
+
+const EXTRACTION_RESPONSE_SCHEMA = {
+  type: Type.OBJECT,
+  properties: {
+    questions: {
+      type: Type.ARRAY,
+      items: QUESTION_ITEM_SCHEMA,
+    },
+  },
+  required: ["questions"],
 };
 
 const EXTRACTION_PROMPT_BASE = `You are extracting exam questions from an arbitrary, unstructured PDF question paper so an admin can review and import them into an exam builder.
@@ -98,7 +103,7 @@ Rules:
 - level, marks, negativeMark, and duration are best-effort. Only set marks/negativeMark/duration when the document actually states them (e.g. "2 marks each", "-1 for wrong answer", "90 seconds per question"); otherwise omit those fields entirely rather than guessing a number — omitting them is always safe. Default level to 2 when there's no basis to judge difficulty.
 - explanation: if a written solution/explanation for a question's correct answer is available anywhere in the source — printed right after the question, in an answer key/solutions section elsewhere in the same document, or in a separate answer-key document provided alongside the question paper (see below if one was provided) — extract it into that question's \`explanation\` field, matched by question number/order. Apply the same LaTeX math-delimiter rule as questionText when it contains formulas. Omit the field entirely for a question with no available explanation — never invent one.
 - correctAnswers must never be left empty: use the explicit answer key wherever one is available (inline, in an answer-key section, or in a separate document); only fall back to your own best-effort guess when no answer key for that question exists anywhere in the source(s).
-- Call the extract_questions tool exactly once with the complete result. Do not include any other prose or commentary.`;
+- Return your entire answer as the structured JSON response described by the response schema. Do not include any other prose or commentary outside that JSON.`;
 
 // Appended to the base prompt only when a second, separately-uploaded PDF
 // is present — kept out of the prompt entirely on a single-file import so
@@ -142,16 +147,40 @@ const buildDraftQuestion = (q) => {
   };
 };
 
+// Builds a clear, specific error message from a Gemini SDK error rather than
+// a generic "try again" — a lesson learned the hard way from an earlier
+// AI-provider outage on this exact feature, where a real billing/credit
+// problem hid behind a message that told the admin nothing actionable and
+// needed a server-log lookup to diagnose. Whatever isn't a recognized case
+// still surfaces the SDK's own error text, so a genuinely new failure mode
+// is diagnosable straight from the toast the admin sees.
+const describeGeminiError = (apiError) => {
+  const status = apiError?.status;
+  const rawMessage = apiError?.message || String(apiError || "");
+
+  if (status === 429 || /RESOURCE_EXHAUSTED|rate.?limit/i.test(rawMessage)) {
+    return "The question-extraction service has hit its free-tier rate limit. Wait a minute and try again — if this keeps happening, the free daily quota may be used up for today.";
+  }
+  if (status === 401 || status === 403 || /API key|permission|unauthenticated/i.test(rawMessage)) {
+    return "The question-extraction service's API key is missing, invalid, or restricted. Please contact the administrator to check the GEMINI_API_KEY setting.";
+  }
+  if (/quota|billing|credit/i.test(rawMessage)) {
+    return `The question-extraction service reported a quota/billing problem: ${rawMessage}`;
+  }
+  return `Failed to reach the question-extraction service: ${rawMessage || "unknown error"}. Please try again.`;
+};
+
 // Extracts structured draft questions from an admin-uploaded PDF question
-// paper using the Anthropic API. This never writes to the database — the
-// admin reviews/edits the returned draftQuestions client-side and only
-// explicit confirmation merges them into the normal exam create/update flow.
+// paper using the Gemini API (Google's free-tier-eligible AI service). This
+// never writes to the database — the admin reviews/edits the returned
+// draftQuestions client-side and only explicit confirmation merges them into
+// the normal exam create/update flow.
 const extractQuestionsFromPdf = async (req, res) => {
   try {
-    // questionImportRoute.js now uses upload.fields([...]), so files arrive
-    // as req.files.<fieldname>[0] instead of the old upload.single()'s
-    // req.file. "file" (the question paper) is required; "answerKeyFile"
-    // (a separately-uploaded answer key/solutions PDF) is optional.
+    // questionImportRoute.js uses upload.fields([...]), so files arrive as
+    // req.files.<fieldname>[0] instead of upload.single()'s req.file. "file"
+    // (the question paper) is required; "answerKeyFile" (a separately-
+    // uploaded answer key/solutions PDF) is optional.
     const questionFile = req.files?.file?.[0];
     const answerKeyFile = req.files?.answerKeyFile?.[0];
 
@@ -161,10 +190,10 @@ const extractQuestionsFromPdf = async (req, res) => {
 
     let client;
     try {
-      client = getAnthropicClient();
+      client = getGeminiClient();
     } catch (err) {
       if (err.code === "MISSING_API_KEY") {
-        console.error("PDF import called without ANTHROPIC_API_KEY configured.");
+        console.error("PDF import called without GEMINI_API_KEY configured.");
         return res.status(500).json({
           success: false,
           message: "PDF import is not configured on the server yet. Please contact the administrator.",
@@ -176,30 +205,25 @@ const extractQuestionsFromPdf = async (req, res) => {
     const base64Data = questionFile.buffer.toString("base64");
     const answerKeyBase64 = answerKeyFile ? answerKeyFile.buffer.toString("base64") : null;
 
-    const content = [
+    const parts = [
       {
-        type: "document",
-        source: {
-          type: "base64",
-          media_type: "application/pdf",
+        inlineData: {
+          mimeType: "application/pdf",
           data: base64Data,
         },
       },
     ];
 
     if (answerKeyBase64) {
-      content.push({
-        type: "document",
-        source: {
-          type: "base64",
-          media_type: "application/pdf",
+      parts.push({
+        inlineData: {
+          mimeType: "application/pdf",
           data: answerKeyBase64,
         },
       });
     }
 
-    content.push({
-      type: "text",
+    parts.push({
       text: answerKeyBase64
         ? `${EXTRACTION_PROMPT_BASE}\n\n${ANSWER_KEY_DOCUMENT_NOTE}`
         : EXTRACTION_PROMPT_BASE,
@@ -207,33 +231,50 @@ const extractQuestionsFromPdf = async (req, res) => {
 
     let response;
     try {
-      response = await client.messages.create({
-        model: ANTHROPIC_MODEL,
-        max_tokens: 8192,
-        tools: [EXTRACT_QUESTIONS_TOOL],
-        tool_choice: { type: "tool", name: "extract_questions" },
-        messages: [
-          {
-            role: "user",
-            content,
-          },
-        ],
+      response = await client.models.generateContent({
+        model: GEMINI_MODEL,
+        contents: [{ role: "user", parts }],
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: EXTRACTION_RESPONSE_SCHEMA,
+          maxOutputTokens: 8192,
+        },
       });
     } catch (apiError) {
-      console.error("Anthropic API error during PDF question extraction:", apiError?.message || apiError);
+      console.error(
+        "Gemini API error during PDF question extraction:",
+        apiError?.status,
+        apiError?.message || apiError,
+      );
       return res.status(502).json({
         success: false,
-        message: "Failed to reach the question-extraction service. Please try again.",
+        message: describeGeminiError(apiError),
       });
     }
 
-    const toolUseBlock = (response.content || []).find(
-      (block) => block.type === "tool_use" && block.name === "extract_questions",
-    );
+    // The SDK exposes the combined text output as a `.text` property (not a
+    // method) on the response in the current @google/genai version — guard
+    // for either shape defensively in case that changes in a future SDK
+    // release.
+    const rawText = typeof response?.text === "function" ? response.text() : response?.text;
 
-    const extractedQuestions = toolUseBlock?.input?.questions;
+    let parsedResponse;
+    try {
+      parsedResponse = JSON.parse(rawText);
+    } catch (parseError) {
+      console.error(
+        "Gemini returned non-JSON output for PDF extraction:",
+        typeof rawText === "string" ? rawText.slice(0, 2000) : rawText,
+      );
+      return res.status(502).json({
+        success: false,
+        message: "The extraction service returned an unexpected response. Please try again.",
+      });
+    }
 
-    if (!toolUseBlock || !Array.isArray(extractedQuestions) || extractedQuestions.length === 0) {
+    const extractedQuestions = parsedResponse?.questions;
+
+    if (!Array.isArray(extractedQuestions) || extractedQuestions.length === 0) {
       return res.status(422).json({
         success: false,
         message: "Could not extract any questions from this PDF. Please check the file and try again.",
