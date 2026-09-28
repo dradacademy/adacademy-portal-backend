@@ -64,13 +64,72 @@ const parseNumericAnswer = (raw) => {
 // epsilon absorbs floating-point rounding, not intended as an
 // answer-tolerance/range feature.
 const NUMERIC_MATCH_EPSILON = 1e-9;
+
+// Automatic rounding-tolerance for a NAT-style numeric answer, derived
+// directly from how many decimal places the admin's own stored correct
+// answer has — e.g. an answer authored as "1.10" (2 decimal places) is
+// treated as correct for any submitted value within 1.10 ± 0.01 (1.09 to
+// 1.11 inclusive), matching the standard GATE "round off to N decimal
+// places" grading convention without requiring the admin to separately
+// state, extract, or configure a range for every question. Applying by
+// default — instead of only when an admin explicitly opts a question into
+// range mode — is what makes this correct for every already-created
+// question too, with no backfill: the tolerance is computed fresh from the
+// question's existing correctAnswers at grading time, every time.
+//
+// Deliberately conservative about WHICH answers get an automatic
+// tolerance: only a plain decimal with at least one digit after the point
+// ("1.10", "-0.7") qualifies. A plain integer ("12") is left an exact
+// match — there's no reliable signal for what tolerance would be
+// appropriate for a whole-number NAT answer (it might be an exact count,
+// e.g. "how many piles are required"), and guessing wrong there risks
+// marking a genuinely wrong answer Correct. Scientific/power notation
+// ("1e-7", "10^-7") is left exact for the same reason. An admin can still
+// override with an explicit custom range via natAnswerMode "range" (e.g.
+// for a legitimately wider tolerance than pure rounding, or to add a
+// tolerance to an integer answer) — that continues to take priority
+// wherever it's set, exactly as before.
+const AUTO_TOLERANCE_DECIMAL_RE = /^[+-]?\d+\.(\d+)$/;
+const deriveAutoTolerance = (raw) => {
+  if (raw === null || raw === undefined) return null;
+  const match = String(raw).trim().match(AUTO_TOLERANCE_DECIMAL_RE);
+  if (!match) return null;
+  return Math.pow(10, -match[1].length);
+};
+
 const isNumericMatch = (correctAnswers, studentAnswer) => {
   const studentNum = parseNumericAnswer(studentAnswer);
   if (Number.isNaN(studentNum)) return false;
   return correctAnswers.some((ans) => {
     const ansNum = parseNumericAnswer(ans);
-    return !Number.isNaN(ansNum) && Math.abs(ansNum - studentNum) < NUMERIC_MATCH_EPSILON;
+    if (Number.isNaN(ansNum)) return false;
+    const tolerance = deriveAutoTolerance(ans) ?? NUMERIC_MATCH_EPSILON;
+    return Math.abs(ansNum - studentNum) <= tolerance + NUMERIC_MATCH_EPSILON;
   });
+};
+
+// Mirrors isNumericMatch above for "Short Answer" questions shaped like a
+// GATE-style numeric answer — exactly one Expected Keyword, and that
+// keyword is itself a plain number. A genuinely free-text Short Answer
+// question (zero/multiple keywords, or a non-numeric keyword like "True"
+// or a sentence) — or a student answer that isn't itself a plain number
+// (e.g. "1.10 m", included-unit answers that only ever worked via
+// substring keyword matching) — returns null, telling the caller to fall
+// back to the existing keyword substring match unchanged. Only ever
+// returns true/false when both the question and the student's answer
+// genuinely look like a single rounded numeric value being compared.
+const isShortAnswerNumericAutoMatch = (correctAnswers, studentAnswer) => {
+  if (!Array.isArray(correctAnswers) || correctAnswers.length !== 1) {
+    return null;
+  }
+  const correctRaw = correctAnswers[0];
+  const correctNum = parseNumericAnswer(correctRaw);
+  if (Number.isNaN(correctNum)) return null;
+  const studentNum = parseNumericAnswer(studentAnswer);
+  if (Number.isNaN(studentNum)) return null;
+
+  const tolerance = deriveAutoTolerance(correctRaw) ?? NUMERIC_MATCH_EPSILON;
+  return Math.abs(correctNum - studentNum) <= tolerance + NUMERIC_MATCH_EPSILON;
 };
 
 // NAT range grading — used when a question's natAnswerMode is "range"
@@ -224,6 +283,20 @@ const getAnswerStatus = ({
           : "Incorrect";
       }
 
+      // Applies automatically to the common GATE-style case — one numeric
+      // keyword — without the admin needing to opt in via the range
+      // checkbox; see isShortAnswerNumericAutoMatch above. Returns null
+      // (not true/false) for anything that isn't this exact shape, so
+      // ordinary free-text Short Answer keyword matching is completely
+      // unaffected.
+      const autoNumericMatch = isShortAnswerNumericAutoMatch(
+        correctAnswers,
+        studentAnswer,
+      );
+      if (autoNumericMatch !== null) {
+        return autoNumericMatch ? "Correct" : "Incorrect";
+      }
+
       const matchCount = correctAnswers.filter((word) =>
         studentAnswer.toLowerCase().includes(word.toLowerCase()),
       ).length;
@@ -337,11 +410,19 @@ const calculateMarks = (question, studQuestion, positiveMark, negativeMark) => {
     }
 
     case "Short Answer": {
-      // See the matching comment in getAnswerStatus above.
+      // See the matching comments in getAnswerStatus above.
       if (natAnswerMode === "range") {
         return isNumericInRange(rangeMin, rangeMax, studentAnswer)
           ? positiveMark
           : 0;
+      }
+
+      const autoNumericMatch = isShortAnswerNumericAutoMatch(
+        correctAnswers,
+        studentAnswer,
+      );
+      if (autoNumericMatch !== null) {
+        return autoNumericMatch ? positiveMark : 0;
       }
 
       const matchCount = correctAnswers.filter((word) =>
@@ -517,6 +598,8 @@ module.exports = {
   isMcqCorrectByIndex,
   getMsqIndexSets,
   parseNumericAnswer,
+  deriveAutoTolerance,
+  isShortAnswerNumericAutoMatch,
   getMarksByLevel,
   resolveQuestionMarks,
   resolveQuestionDuration,

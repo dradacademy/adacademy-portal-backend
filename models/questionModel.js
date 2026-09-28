@@ -60,19 +60,25 @@ const QuestionSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
-    // NAT range-grading support: when natAnswerMode is "range", any
+    // NAT CUSTOM range-grading override: when natAnswerMode is "range", any
     // submitted numeric value within [rangeMin, rangeMax] inclusive is
     // graded correct instead of requiring an exact match against
     // `correctAnswers` — e.g. a range of "10 to 15" accepts 10, 12.5, and 15
-    // all as correct. Originally meaningful only for a numeric ("Fill in
-    // the Blanks" + isNumericAnswer) question; also used, as of the
-    // negative-mark/answer-key-formatting round, by a "Short Answer"
-    // question whose single-value numeric answer needs a rounding-tolerance
-    // range instead of exact keyword matching (see ExamSubmissionHelper.js's
-    // getAnswerStatus/calculateMarks "Short Answer" case) — a GATE-style
-    // numerical question is routinely entered as Short Answer rather than
-    // Fill in the Blanks, and its official answer key often states an
-    // acceptable range like "1.09 to 1.11" for exactly this reason.
+    // all as correct. Meaningful for both numeric ("Fill in the Blanks" +
+    // isNumericAnswer) and "Short Answer" (single numeric keyword)
+    // questions.
+    //
+    // This is now an OVERRIDE, not the only way to get tolerant grading:
+    // the default "exact" mode already auto-derives a GATE-style rounding
+    // tolerance from a decimal correctAnswer's own precision (e.g. "1.10"
+    // accepts 1.09–1.11) with no natAnswerMode/rangeMin/rangeMax involved at
+    // all — see ExamSubmissionHelper.js's deriveAutoTolerance,
+    // isShortAnswerNumericAutoMatch, and isNumericMatch. Set natAnswerMode
+    // to "range" only when a question needs something OTHER than that
+    // automatic tolerance — a deliberately wider/narrower range, or a
+    // tolerance on a whole-number answer (which never gets one
+    // automatically).
+    //
     // rangeMin/rangeMax are stored as strings (not Number) so the same
     // scientific/power notations already accepted for exact NAT answers
     // ("1e-3", "10^-7", ...) — see ExamSubmissionHelper.js's
