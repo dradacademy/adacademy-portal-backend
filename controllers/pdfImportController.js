@@ -1,5 +1,6 @@
 const { GoogleGenAI, Type } = require("@google/genai");
 const { looksNumericAnswerKey } = require("../utils/ExamSubmissionHelper");
+const { recordAiUsage } = require("../utils/aiUsageRecorder");
 
 // Clients are built lazily (one per API-key variable) so a missing key never
 // crashes the server on boot. Two keys are supported:
@@ -272,7 +273,7 @@ const buildAttemptPlan = () => {
   return plan;
 };
 
-const generateWithResilience = async (parts) => {
+const generateWithResilience = async (parts, usageContext = {}) => {
   const plan = buildAttemptPlan();
   if (plan.length === 0) {
     const err = new Error("No Gemini API key is configured on the server.");
@@ -300,6 +301,8 @@ const generateWithResilience = async (parts) => {
             },
           });
           if (stepIndex > 0) console.log(`PDF extraction succeeded via ${step.label} (model ${model}).`);
+          // Usage meter (admin "AI credits" panel). Never awaited, never throws.
+          recordAiUsage({ response, model, keyLabel: step.label, source: usageContext.source, userId: usageContext.userId });
           return { response, model };
         } catch (e) {
           lastError = e;
@@ -392,8 +395,8 @@ const continuationNote = (questions) => {
 
 // One extraction pass -> { questions, cut } where `cut` means the response
 // was truncated (so more questions may remain).
-const runExtractionPass = async (parts) => {
-  const { response } = await generateWithResilience(parts);
+const runExtractionPass = async (parts, usageContext = {}) => {
+  const { response } = await generateWithResilience(parts, usageContext);
   const finishReason = response?.candidates?.[0]?.finishReason;
   const rawText = typeof response?.text === "function" ? response.text() : response?.text;
 
@@ -451,7 +454,7 @@ const describeGeminiError = (apiError) => {
 // "continuation" note so a question that spans two batches isn't duplicated.
 // Returns { questions, incomplete } or { error: { status, message } }.
 // ---------------------------------------------------------------------------
-const runExtraction = async (batches, promptText) => {
+const runExtraction = async (batches, promptText, usageContext = {}) => {
   const allQuestions = [];
   const seen = new Set();
   let incomplete = false;
@@ -467,7 +470,7 @@ const runExtraction = async (batches, promptText) => {
 
       let result;
       try {
-        result = await runExtractionPass([...batches[b], { text }]);
+        result = await runExtractionPass([...batches[b], { text }], usageContext);
       } catch (apiError) {
         if (allQuestions.length > 0) {
           // Keep what we already have instead of throwing it all away.
@@ -517,7 +520,7 @@ const findCompletionMatch = (question, returned, position, total) => {
   return returned.length === total ? returned[position] : null;
 };
 
-const fillMissingExplanations = async (baseParts, questions) => {
+const fillMissingExplanations = async (baseParts, questions, usageContext = {}) => {
   const hasText = (q) => typeof q.explanation === "string" && q.explanation.trim() !== "";
   const missing = questions.filter((q) => !hasText(q));
   if (missing.length === 0) return 0;
@@ -531,7 +534,7 @@ EXPLANATION COMPLETION: the separate answer key document contains a worked solut
 ${list}
 Return ONLY these questions again (same wording, options and correct answers as the question paper), this time with \`explanation\` filled in from the answer key document, matched by question number or by the problem statement. Do not return any other question.`;
 
-  const { questions: returned } = await runExtractionPass([...baseParts, { text }]);
+  const { questions: returned } = await runExtractionPass([...baseParts, { text }], { ...usageContext, source: "answer-key" });
   let filled = 0;
   missing.forEach((q, i) => {
     const hit = findCompletionMatch(q, returned, i, missing.length);
@@ -579,7 +582,8 @@ const extractQuestionsFromPdf = async (req, res) => {
       });
     }
 
-    const outcome = await runExtraction([baseParts], buildPromptText(Boolean(answerKeyFile)));
+    const usageContext = { source: "pdf", userId: req.user?._id };
+    const outcome = await runExtraction([baseParts], buildPromptText(Boolean(answerKeyFile)), usageContext);
     if (outcome.error) {
       return res.status(outcome.error.status).json({ success: false, message: outcome.error.message });
     }
@@ -592,7 +596,7 @@ const extractQuestionsFromPdf = async (req, res) => {
 
     if (answerKeyFile) {
       try {
-        await fillMissingExplanations(baseParts, outcome.questions);
+        await fillMissingExplanations(baseParts, outcome.questions, usageContext);
       } catch (completionError) {
         // Never lose the questions we already have because the extra pass failed.
         console.error("Answer key completion pass failed:", errorText(completionError).slice(0, 300));
@@ -698,7 +702,7 @@ const extractQuestionsFromImages = async (req, res) => {
     const batches = makeImageBatches(files);
     const batchParts = buildImageBatchParts(batches, files.length);
 
-    const outcome = await runExtraction(batchParts, buildImagePromptText());
+    const outcome = await runExtraction(batchParts, buildImagePromptText(), { source: "images", userId: req.user?._id });
     if (outcome.error) {
       return res.status(outcome.error.status).json({ success: false, message: outcome.error.message });
     }

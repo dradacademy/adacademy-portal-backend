@@ -6,6 +6,7 @@ const {
 } = require("../controllers/pdfImportController");
 const upload = require("../utils/pdfUploadMulterConfig");
 const imageUpload = require("../utils/imageUploadMulterConfig");
+const { getAiUsage, updateAiUsageSettings } = require("../controllers/aiUsageController");
 const {
   verifyToken,
   authorizeRoles,
@@ -74,5 +75,10 @@ router.post(
   },
   extractQuestionsFromImages
 );
+
+// Admin-only AI credits meter (estimated spend / remaining on the paid Gemini key).
+// Deliberately NOT behind pdfImportLimiter - reading the meter is free.
+router.get("/usage", verifyToken, authorizeRoles("admin"), getAiUsage);
+router.put("/usage/settings", verifyToken, authorizeRoles("admin"), updateAiUsageSettings);
 
 module.exports = router;
