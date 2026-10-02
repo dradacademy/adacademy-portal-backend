@@ -1,19 +1,17 @@
 const { GoogleGenAI, Type } = require("@google/genai");
 
-// Lazily constructed so a missing GEMINI_API_KEY doesn't crash the whole
-// server on boot — it only surfaces as a clean error the first time this
-// endpoint is actually called.
-let geminiClient = null;
-const getGeminiClient = () => {
-  if (!geminiClient) {
-    if (!process.env.GEMINI_API_KEY) {
-      const err = new Error("GEMINI_API_KEY is not configured on the server.");
-      err.code = "MISSING_API_KEY";
-      throw err;
-    }
-    geminiClient = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+// Clients are built lazily (one per API-key variable) so a missing key never
+// crashes the server on boot. Two keys are supported:
+//   GEMINI_API_KEY       - the normal key (free tier or paid, whatever it is)
+//   GEMINI_API_KEY_PAID  - OPTIONAL key from a billing-enabled Google project.
+//                          When set, it is used automatically as soon as the
+//                          first key fails (overloaded / rate-limited / quota).
+const clientCache = {};
+const getClientFor = (keyName) => {
+  if (!clientCache[keyName]) {
+    clientCache[keyName] = new GoogleGenAI({ apiKey: process.env[keyName] });
   }
-  return geminiClient;
+  return clientCache[keyName];
 };
 
 // Model names come from env vars so a retired/renamed model is a Railway
@@ -40,6 +38,13 @@ const RETRY_DELAYS_MS = String(process.env.GEMINI_RETRY_DELAYS_MS || "3000,8000"
 
 // A very long paper may need several passes ("continue after question N").
 const MAX_PASSES = parseInt(process.env.GEMINI_PDF_MAX_PASSES, 10) || 4;
+
+// When a paid key exists, the first (free) key only gets a short try before we
+// move to the paid key, so the admin isn't left waiting on a busy free tier.
+const FREE_RETRY_DELAYS_MS = String(process.env.GEMINI_FREE_RETRY_DELAYS_MS || "3000")
+  .split(",")
+  .map((n) => parseInt(n, 10))
+  .filter((n) => Number.isFinite(n) && n >= 0);
 
 // A full question paper (especially one with many questions, long option
 // lists, or a non-Latin script like Tamil, which tends to use more tokens
@@ -220,37 +225,85 @@ const classifyGeminiError = (e) => {
   return "fatal";
 };
 
-const generateWithResilience = async (client, parts) => {
+// Order of attempts. With only GEMINI_API_KEY set: that key, full model chain
+// (same as before). With GEMINI_API_KEY_PAID also set: the first key tries
+// ONLY the primary model briefly, then the paid key runs the full chain, so a
+// free-tier overload never lowers accuracy by dropping to a weaker model while
+// a paid key is available.
+const buildAttemptPlan = () => {
+  const hasPaid = Boolean(process.env.GEMINI_API_KEY_PAID);
+  const plan = [];
+  if (process.env.GEMINI_API_KEY) {
+    plan.push({
+      keyName: "GEMINI_API_KEY",
+      label: hasPaid ? "free/first key" : "primary key",
+      models: hasPaid ? [MODEL_CHAIN[0]] : MODEL_CHAIN,
+      delays: hasPaid ? FREE_RETRY_DELAYS_MS : RETRY_DELAYS_MS,
+    });
+  }
+  if (hasPaid) {
+    plan.push({
+      keyName: "GEMINI_API_KEY_PAID",
+      label: "paid key",
+      models: MODEL_CHAIN,
+      delays: RETRY_DELAYS_MS,
+    });
+  }
+  return plan;
+};
+
+const generateWithResilience = async (parts) => {
+  const plan = buildAttemptPlan();
+  if (plan.length === 0) {
+    const err = new Error("No Gemini API key is configured on the server.");
+    err.code = "MISSING_API_KEY";
+    throw err;
+  }
+
   let lastError;
-  for (const model of MODEL_CHAIN) {
-    for (let attempt = 1; attempt <= RETRY_DELAYS_MS.length + 1; attempt++) {
-      try {
-        const response = await client.models.generateContent({
-          model,
-          contents: [{ role: "user", parts }],
-          config: {
-            responseMimeType: "application/json",
-            responseSchema: EXTRACTION_RESPONSE_SCHEMA,
-            maxOutputTokens: GEMINI_PDF_MAX_OUTPUT_TOKENS,
-            temperature: 0,
-          },
-        });
-        return { response, model };
-      } catch (e) {
-        lastError = e;
-        const kind = classifyGeminiError(e);
-        console.error(
-          `Gemini API error during PDF question extraction (model ${model}, attempt ${attempt}, ${kind}):`,
-          errorStatus(e),
-          errorText(e).slice(0, 400),
-        );
-        if (kind === "fatal") throw e;
-        if (kind === "transient" && attempt <= RETRY_DELAYS_MS.length) {
-          await sleep(RETRY_DELAYS_MS[attempt - 1]);
-          continue;
+  for (let stepIndex = 0; stepIndex < plan.length; stepIndex++) {
+    const step = plan[stepIndex];
+    const isLastStep = stepIndex === plan.length - 1;
+    const client = getClientFor(step.keyName);
+
+    for (const model of step.models) {
+      for (let attempt = 1; attempt <= step.delays.length + 1; attempt++) {
+        try {
+          const response = await client.models.generateContent({
+            model,
+            contents: [{ role: "user", parts }],
+            config: {
+              responseMimeType: "application/json",
+              responseSchema: EXTRACTION_RESPONSE_SCHEMA,
+              maxOutputTokens: GEMINI_PDF_MAX_OUTPUT_TOKENS,
+              temperature: 0,
+            },
+          });
+          if (stepIndex > 0) console.log(`PDF extraction succeeded via ${step.label} (model ${model}).`);
+          return { response, model };
+        } catch (e) {
+          lastError = e;
+          const kind = classifyGeminiError(e);
+          console.error(
+            `Gemini API error during PDF question extraction (${step.label}, model ${model}, attempt ${attempt}, ${kind}):`,
+            errorStatus(e),
+            errorText(e).slice(0, 400),
+          );
+          // A bad/blocked key only stops everything if there is no other key to try.
+          if (kind === "fatal") {
+            if (isLastStep) throw e;
+            break;
+          }
+          if (kind === "transient" && attempt <= step.delays.length) {
+            await sleep(step.delays[attempt - 1]);
+            continue;
+          }
+          break; // next model in this key's chain
         }
-        break; // move on to the next model in the chain
       }
+    }
+    if (!isLastStep) {
+      console.warn(`Gemini ${step.label} could not complete the request; failing over to the next key.`);
     }
   }
   throw lastError;
@@ -319,8 +372,8 @@ const continuationNote = (questions) => {
 
 // One extraction pass -> { questions, cut } where `cut` means the response
 // was truncated (so more questions may remain).
-const runExtractionPass = async (client, parts) => {
-  const { response } = await generateWithResilience(client, parts);
+const runExtractionPass = async (parts) => {
+  const { response } = await generateWithResilience(parts);
   const finishReason = response?.candidates?.[0]?.finishReason;
   const rawText = typeof response?.text === "function" ? response.text() : response?.text;
 
@@ -361,7 +414,7 @@ const describeGeminiError = (apiError) => {
     return "The AI model configured for PDF import is no longer available from Google. Please ask the administrator to update the GEMINI_PDF_MODEL setting.";
   }
   if (status === 503 || /UNAVAILABLE|high demand/i.test(rawMessage)) {
-    return "Google's AI service is overloaded right now (it was retried automatically several times). This is temporary — please try again in a few minutes.";
+    return "Google's AI service is overloaded right now (it was retried automatically, including on the backup key if one is set). This is temporary — please try again in a few minutes.";
   }
   if (/quota|billing|credit/i.test(rawMessage)) {
     return `The question-extraction service reported a quota/billing problem: ${rawMessage}`;
@@ -385,18 +438,12 @@ const extractQuestionsFromPdf = async (req, res) => {
       return res.status(400).json({ success: false, message: "No PDF file uploaded." });
     }
 
-    let client;
-    try {
-      client = getGeminiClient();
-    } catch (err) {
-      if (err.code === "MISSING_API_KEY") {
-        console.error("PDF import called without GEMINI_API_KEY configured.");
-        return res.status(500).json({
-          success: false,
-          message: "PDF import is not configured on the server yet. Please contact the administrator.",
-        });
-      }
-      throw err;
+    if (buildAttemptPlan().length === 0) {
+      console.error("PDF import called without GEMINI_API_KEY configured.");
+      return res.status(500).json({
+        success: false,
+        message: "PDF import is not configured on the server yet. Please contact the administrator.",
+      });
     }
 
     const baseParts = [
@@ -421,7 +468,7 @@ const extractQuestionsFromPdf = async (req, res) => {
 
       let result;
       try {
-        result = await runExtractionPass(client, [...baseParts, { text }]);
+        result = await runExtractionPass([...baseParts, { text }]);
       } catch (apiError) {
         if (allQuestions.length > 0) {
           // Keep what we already have instead of throwing it all away.
@@ -485,5 +532,5 @@ const extractQuestionsFromPdf = async (req, res) => {
 module.exports = {
   extractQuestionsFromPdf,
   // Exposed for unit tests only.
-  _internals: { salvageQuestions, classifyGeminiError, generateWithResilience, buildPromptText },
+  _internals: { salvageQuestions, classifyGeminiError, generateWithResilience, buildPromptText, buildAttemptPlan },
 };
