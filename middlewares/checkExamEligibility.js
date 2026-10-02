@@ -1,4 +1,5 @@
 const examModel = require("../models/examModel");
+const { prepareQuestionsForStudent } = require("../utils/numericKeypad");
 
 const checkExamEligibility = async (req, res, next) => {
   try {
@@ -13,9 +14,15 @@ const checkExamEligibility = async (req, res, next) => {
       })
       .populate({
         path: "questions",
-        select: "-correctAnswers",
       })
       .lean();
+
+    // Students must never receive the answer key, so correctAnswers is removed
+    // here (this used to be `select: "-correctAnswers"` on the query). It is
+    // removed AFTER working out which blanks are numeric - that needs the key -
+    // so those get the on-screen number pad automatically. One helper does
+    // both steps so the key can't be left in by accident.
+    if (exam) prepareQuestionsForStudent(exam.questions);
 
     if (!exam) {
       return res.status(404).json({

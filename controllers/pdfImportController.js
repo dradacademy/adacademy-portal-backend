@@ -1,4 +1,5 @@
 const { GoogleGenAI, Type } = require("@google/genai");
+const { looksNumericAnswerKey } = require("../utils/ExamSubmissionHelper");
 
 // Clients are built lazily (one per API-key variable) so a missing key never
 // crashes the server on boot. Two keys are supported:
@@ -153,6 +154,11 @@ If the answer key document's numbering doesn't line up cleanly with a question, 
 
 const buildDraftQuestion = (q) => {
   const isChoiceType = q.questionType === "MCQ" || q.questionType === "MSQ";
+  const correctAnswers = Array.isArray(q.correctAnswers)
+    ? q.correctAnswers
+    : q.correctAnswers != null
+    ? [String(q.correctAnswers)]
+    : [];
   return {
     questionType: q.questionType,
     questionText: q.questionText,
@@ -160,11 +166,11 @@ const buildDraftQuestion = (q) => {
       isChoiceType && Array.isArray(q.options)
         ? q.options.map((text) => ({ text, image: null }))
         : undefined,
-    correctAnswers: Array.isArray(q.correctAnswers)
-      ? q.correctAnswers
-      : q.correctAnswers != null
-      ? [String(q.correctAnswers)]
-      : [],
+    correctAnswers,
+    // A numeric-answer ("NAT") question: a Fill in the Blanks whose answer is a
+    // number. Flagging it here means it is graded by value with the automatic
+    // rounding tolerance and students get the number pad - no manual tick needed.
+    isNumericAnswer: q.questionType === "Fill in the Blanks" && looksNumericAnswerKey(correctAnswers),
     level: [1, 2, 3, 4].includes(q.level) ? q.level : 2,
     marks: typeof q.marks === "number" ? q.marks : null,
     negativeMark: typeof q.negativeMark === "number" ? q.negativeMark : null,

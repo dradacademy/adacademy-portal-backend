@@ -108,6 +108,18 @@ const isNumericMatch = (correctAnswers, studentAnswer) => {
   });
 };
 
+// Automatic NAT detection. A "Fill in the Blanks" question whose stored
+// correct answer(s) are ALL plain numbers is graded as a numeric (NAT) question
+// - by value, with the automatic rounding tolerance above - even when the
+// admin never ticked the "Numeric answer" box. Questions imported from a PDF
+// or screenshots, and every question created before this existed, therefore
+// get the tolerance without any manual step. The box (or the exam-wide
+// keypad switch) now only controls whether students see the number pad.
+const looksNumericAnswerKey = (correctAnswers) =>
+  Array.isArray(correctAnswers) &&
+  correctAnswers.length > 0 &&
+  correctAnswers.every((ans) => !Number.isNaN(parseNumericAnswer(ans)));
+
 // Mirrors isNumericMatch above for "Short Answer" questions shaped like a
 // GATE-style numeric answer — exactly one Expected Keyword, and that
 // keyword is itself a plain number. A genuinely free-text Short Answer
@@ -234,7 +246,7 @@ const getAnswerStatus = ({
     }
 
     case "Fill in the Blanks": {
-      const isCorrect = isNumericAnswer
+      const isCorrect = isNumericAnswer || looksNumericAnswerKey(correctAnswers)
         ? isNumericAnswerCorrect(
             { correctAnswers, natAnswerMode, rangeMin, rangeMax },
             studentAnswer,
@@ -374,7 +386,7 @@ const calculateMarks = (question, studQuestion, positiveMark, negativeMark) => {
     case "Fill in the Blanks": {
       const normalizeNoSpace = (str) => str.toLowerCase().replace(/\s+/g, "");
 
-      const isCorrect = isNumericAnswer
+      const isCorrect = isNumericAnswer || looksNumericAnswerKey(correctAnswers)
         ? isNumericAnswerCorrect(
             { correctAnswers, natAnswerMode, rangeMin, rangeMax },
             studentAnswer,
@@ -599,6 +611,7 @@ module.exports = {
   getMsqIndexSets,
   parseNumericAnswer,
   deriveAutoTolerance,
+  looksNumericAnswerKey,
   isShortAnswerNumericAutoMatch,
   getMarksByLevel,
   resolveQuestionMarks,
