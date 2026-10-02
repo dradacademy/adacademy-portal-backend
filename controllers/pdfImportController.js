@@ -16,12 +16,30 @@ const getGeminiClient = () => {
   return geminiClient;
 };
 
-// Configurable via env var so a retired/renamed model can be swapped without
-// a code change or redeploy — same pattern used elsewhere in this codebase
-// (e.g. ANTHROPIC_PDF_MODEL previously). "gemini-2.5-flash" is Google's
-// current free-tier-eligible model with native PDF understanding as of this
-// writing (2026-09-28).
-const GEMINI_MODEL = process.env.GEMINI_PDF_MODEL || "gemini-2.5-flash";
+// Model names come from env vars so a retired/renamed model is a Railway
+// variable change, never a redeploy. GEMINI_PDF_MODEL is the primary model;
+// GEMINI_PDF_FALLBACK_MODELS is an optional comma-separated list tried in
+// order if the primary is overloaded (503), rate-limited (429) or retired
+// (404). The default below is the model Google's own 404 message pointed to
+// when gemini-2.5-flash was retired (2026-09-28).
+const GEMINI_MODEL = process.env.GEMINI_PDF_MODEL || "gemini-3.8-flash";
+const MODEL_CHAIN = [
+  GEMINI_MODEL,
+  ...String(process.env.GEMINI_PDF_FALLBACK_MODELS || process.env.GEMINI_PDF_FALLBACK_MODEL || "")
+    .split(",")
+    .map((m) => m.trim())
+    .filter(Boolean),
+].filter((m, i, arr) => arr.indexOf(m) === i);
+
+// Waits (ms) between retries of a transient error on the same model:
+// 3 attempts per model by default.
+const RETRY_DELAYS_MS = String(process.env.GEMINI_RETRY_DELAYS_MS || "3000,8000")
+  .split(",")
+  .map((n) => parseInt(n, 10))
+  .filter((n) => Number.isFinite(n) && n >= 0);
+
+// A very long paper may need several passes ("continue after question N").
+const MAX_PASSES = parseInt(process.env.GEMINI_PDF_MAX_PASSES, 10) || 4;
 
 // A full question paper (especially one with many questions, long option
 // lists, or a non-Latin script like Tamil, which tends to use more tokens
@@ -155,22 +173,195 @@ const buildDraftQuestion = (q) => {
   };
 };
 
-// Builds a clear, specific error message from a Gemini SDK error rather than
-// a generic "try again" — a lesson learned the hard way from an earlier
-// AI-provider outage on this exact feature, where a real billing/credit
-// problem hid behind a message that told the admin nothing actionable and
-// needed a server-log lookup to diagnose. Whatever isn't a recognized case
-// still surfaces the SDK's own error text, so a genuinely new failure mode
-// is diagnosable straight from the toast the admin sees.
+// ---------------------------------------------------------------------------
+// Tamil / bilingual paper support. Gemini reads Tamil natively, so this is a
+// prompt-level addition appended to the base prompt on every extraction.
+// ---------------------------------------------------------------------------
+const LANGUAGE_NOTE = `LANGUAGE RULES (the paper may be English, Tamil, or bilingual Tamil + English, e.g. TNPSC papers):
+- Tamil text (தமிழ்) must be copied exactly as proper Unicode Tamil. Never translate it, never transliterate/romanize it, never replace it with English. If the source PDF uses an old non-Unicode Tamil font and the text looks garbled when read as text, read the page visually and write the correct Unicode Tamil instead.
+- If a question is printed in both Tamil and English, keep BOTH in questionText (in the order printed, separated by a blank line). Do the same for options: keep both languages inside the same option string, separated by " / ". Never split one question into two questions because it is bilingual.
+- Remove option labels from option text — (A) (B) (C) (D), A. B., (1) (2) (3) (4), and Tamil labels such as அ ஆ இ ஈ or (அ) (ஆ) (இ) (ஈ) — but keep the options in their original order. The option text itself must stay verbatim.
+- Answer keys often give a letter or a Tamil label instead of the answer text (A/B/C/D = 1/2/3/4 = அ/ஆ/இ/ஈ in order). Always convert that to the EXACT option text of the matching option in correctAnswers — never put just a letter or number there for MCQ/MSQ.
+- Tamil words and sentences are plain text. Never wrap them in math delimiters; only the mathematical expression itself goes inside \\( \\).`;
+
+const buildPromptText = (hasAnswerKeyDocument) =>
+  [EXTRACTION_PROMPT_BASE, LANGUAGE_NOTE, hasAnswerKeyDocument ? ANSWER_KEY_DOCUMENT_NOTE : null]
+    .filter(Boolean)
+    .join("\n\n");
+
+// ---------------------------------------------------------------------------
+// Resilient Gemini calling. The free tier regularly answers 503 "high demand"
+// (a temporary Google-side overload, not a bug in this app) and occasionally
+// retires a model name (404). So: retry transient errors with backoff, then
+// fall back to the next configured model, and only then give up.
+// ---------------------------------------------------------------------------
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const errorStatus = (e) => Number(e?.status ?? e?.code ?? e?.error?.code) || null;
+const errorText = (e) => String(e?.message || e || "");
+
+// "transient" -> wait and retry the same model; "next-model" -> this model is
+// unusable right now (retired / rate-limited), move straight to the next one;
+// "fatal" -> nothing else will help (bad key etc.), stop immediately.
+const classifyGeminiError = (e) => {
+  const status = errorStatus(e);
+  const text = errorText(e);
+  if (status === 401 || status === 403 || /API key|PERMISSION_DENIED|UNAUTHENTICATED/i.test(text)) {
+    return "fatal";
+  }
+  if (status === 404 || /no longer available|not found|NOT_FOUND/i.test(text)) return "next-model";
+  if (status === 429 || /RESOURCE_EXHAUSTED/i.test(text)) return "next-model";
+  if (
+    [500, 502, 503, 504].includes(status) ||
+    /UNAVAILABLE|high demand|overloaded|ECONNRESET|ETIMEDOUT|fetch failed|socket hang up/i.test(text)
+  ) {
+    return "transient";
+  }
+  return "fatal";
+};
+
+const generateWithResilience = async (client, parts) => {
+  let lastError;
+  for (const model of MODEL_CHAIN) {
+    for (let attempt = 1; attempt <= RETRY_DELAYS_MS.length + 1; attempt++) {
+      try {
+        const response = await client.models.generateContent({
+          model,
+          contents: [{ role: "user", parts }],
+          config: {
+            responseMimeType: "application/json",
+            responseSchema: EXTRACTION_RESPONSE_SCHEMA,
+            maxOutputTokens: GEMINI_PDF_MAX_OUTPUT_TOKENS,
+            temperature: 0,
+          },
+        });
+        return { response, model };
+      } catch (e) {
+        lastError = e;
+        const kind = classifyGeminiError(e);
+        console.error(
+          `Gemini API error during PDF question extraction (model ${model}, attempt ${attempt}, ${kind}):`,
+          errorStatus(e),
+          errorText(e).slice(0, 400),
+        );
+        if (kind === "fatal") throw e;
+        if (kind === "transient" && attempt <= RETRY_DELAYS_MS.length) {
+          await sleep(RETRY_DELAYS_MS[attempt - 1]);
+          continue;
+        }
+        break; // move on to the next model in the chain
+      }
+    }
+  }
+  throw lastError;
+};
+
+// Pulls every COMPLETE question object out of a JSON response that was cut
+// off mid-way (output-token limit, dropped connection). Quote/escape-aware,
+// so braces inside question text can't confuse it.
+const salvageQuestions = (raw) => {
+  if (typeof raw !== "string") return [];
+  const keyAt = raw.indexOf('"questions"');
+  if (keyAt === -1) return [];
+  const arrayStart = raw.indexOf("[", keyAt);
+  if (arrayStart === -1) return [];
+
+  const found = [];
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let objectStart = -1;
+
+  for (let i = arrayStart + 1; i < raw.length; i++) {
+    const c = raw[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (c === "\\") escaped = true;
+      else if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') {
+      inString = true;
+    } else if (c === "{") {
+      if (depth === 0) objectStart = i;
+      depth++;
+    } else if (c === "}") {
+      depth--;
+      if (depth === 0 && objectStart !== -1) {
+        try {
+          found.push(JSON.parse(raw.slice(objectStart, i + 1)));
+        } catch (_) {
+          /* skip a malformed object, keep going */
+        }
+        objectStart = -1;
+      }
+    } else if (c === "]" && depth === 0) {
+      break;
+    }
+  }
+  return found;
+};
+
+const questionKey = (q) =>
+  String(q?.questionText || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 160)
+    .toLowerCase();
+
+const continuationNote = (questions) => {
+  const lastFew = questions
+    .slice(-3)
+    .map((q, i) => `${questions.length - Math.min(3, questions.length) + i + 1}. ${String(q.questionText || "").replace(/\s+/g, " ").slice(0, 120)}`)
+    .join("\n");
+  return `CONTINUATION: ${questions.length} question(s) from this paper have already been extracted. The last ones were:\n${lastFew}\nReturn ONLY the questions that come AFTER those, in original order. Do not repeat any question already extracted. If there are no more questions, return {"questions": []}.`;
+};
+
+// One extraction pass -> { questions, cut } where `cut` means the response
+// was truncated (so more questions may remain).
+const runExtractionPass = async (client, parts) => {
+  const { response } = await generateWithResilience(client, parts);
+  const finishReason = response?.candidates?.[0]?.finishReason;
+  const rawText = typeof response?.text === "function" ? response.text() : response?.text;
+
+  let questions;
+  let cut = finishReason === "MAX_TOKENS";
+  try {
+    const parsed = JSON.parse(rawText);
+    questions = Array.isArray(parsed?.questions) ? parsed.questions : [];
+  } catch (_) {
+    console.error(
+      "Gemini returned non-JSON/truncated output for PDF extraction:",
+      typeof rawText === "string" ? rawText.slice(0, 500) : rawText,
+    );
+    questions = salvageQuestions(rawText);
+    cut = true;
+  }
+  if (cut) {
+    console.error(
+      `Gemini response was cut short (finishReason=${finishReason || "n/a"}); salvaged ${questions.length} complete question(s).`,
+    );
+  }
+  return { questions, cut };
+};
+
+// Builds a clear, specific message from a Gemini SDK error instead of a
+// generic "try again" — a real problem must be diagnosable from the toast.
 const describeGeminiError = (apiError) => {
-  const status = apiError?.status;
-  const rawMessage = apiError?.message || String(apiError || "");
+  const status = errorStatus(apiError);
+  const rawMessage = errorText(apiError);
 
   if (status === 429 || /RESOURCE_EXHAUSTED|rate.?limit/i.test(rawMessage)) {
     return "The question-extraction service has hit its free-tier rate limit. Wait a minute and try again — if this keeps happening, the free daily quota may be used up for today.";
   }
   if (status === 401 || status === 403 || /API key|permission|unauthenticated/i.test(rawMessage)) {
     return "The question-extraction service's API key is missing, invalid, or restricted. Please contact the administrator to check the GEMINI_API_KEY setting.";
+  }
+  if (status === 404 || /no longer available|NOT_FOUND/i.test(rawMessage)) {
+    return "The AI model configured for PDF import is no longer available from Google. Please ask the administrator to update the GEMINI_PDF_MODEL setting.";
+  }
+  if (status === 503 || /UNAVAILABLE|high demand/i.test(rawMessage)) {
+    return "Google's AI service is overloaded right now (it was retried automatically several times). This is temporary — please try again in a few minutes.";
   }
   if (/quota|billing|credit/i.test(rawMessage)) {
     return `The question-extraction service reported a quota/billing problem: ${rawMessage}`;
@@ -179,16 +370,14 @@ const describeGeminiError = (apiError) => {
 };
 
 // Extracts structured draft questions from an admin-uploaded PDF question
-// paper using the Gemini API (Google's free-tier-eligible AI service). This
-// never writes to the database — the admin reviews/edits the returned
-// draftQuestions client-side and only explicit confirmation merges them into
-// the normal exam create/update flow.
+// paper using the Gemini API. This never writes to the database — the admin
+// reviews/edits the returned draftQuestions client-side and only explicit
+// confirmation merges them into the normal exam create/update flow.
 const extractQuestionsFromPdf = async (req, res) => {
   try {
     // questionImportRoute.js uses upload.fields([...]), so files arrive as
-    // req.files.<fieldname>[0] instead of upload.single()'s req.file. "file"
-    // (the question paper) is required; "answerKeyFile" (a separately-
-    // uploaded answer key/solutions PDF) is optional.
+    // req.files.<fieldname>[0]. "file" (the question paper) is required;
+    // "answerKeyFile" (a separate answer key/solutions PDF) is optional.
     const questionFile = req.files?.file?.[0];
     const answerKeyFile = req.files?.answerKeyFile?.[0];
 
@@ -210,112 +399,80 @@ const extractQuestionsFromPdf = async (req, res) => {
       throw err;
     }
 
-    const base64Data = questionFile.buffer.toString("base64");
-    const answerKeyBase64 = answerKeyFile ? answerKeyFile.buffer.toString("base64") : null;
-
-    const parts = [
-      {
-        inlineData: {
-          mimeType: "application/pdf",
-          data: base64Data,
-        },
-      },
+    const baseParts = [
+      { inlineData: { mimeType: "application/pdf", data: questionFile.buffer.toString("base64") } },
     ];
-
-    if (answerKeyBase64) {
-      parts.push({
-        inlineData: {
-          mimeType: "application/pdf",
-          data: answerKeyBase64,
-        },
+    if (answerKeyFile) {
+      baseParts.push({
+        inlineData: { mimeType: "application/pdf", data: answerKeyFile.buffer.toString("base64") },
       });
     }
+    const promptText = buildPromptText(Boolean(answerKeyFile));
 
-    parts.push({
-      text: answerKeyBase64
-        ? `${EXTRACTION_PROMPT_BASE}\n\n${ANSWER_KEY_DOCUMENT_NOTE}`
-        : EXTRACTION_PROMPT_BASE,
-    });
+    const allQuestions = [];
+    const seen = new Set();
+    let stillCut = false;
+    let emptyRetries = 0;
+    let pass = 0;
 
-    let response;
-    try {
-      response = await client.models.generateContent({
-        model: GEMINI_MODEL,
-        contents: [{ role: "user", parts }],
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: EXTRACTION_RESPONSE_SCHEMA,
-          maxOutputTokens: GEMINI_PDF_MAX_OUTPUT_TOKENS,
-        },
+    while (pass < MAX_PASSES) {
+      pass++;
+      const text = allQuestions.length ? `${promptText}\n\n${continuationNote(allQuestions)}` : promptText;
+
+      let result;
+      try {
+        result = await runExtractionPass(client, [...baseParts, { text }]);
+      } catch (apiError) {
+        if (allQuestions.length > 0) {
+          // Keep what we already have instead of throwing it all away.
+          console.error("Later extraction pass failed; returning partial results:", errorText(apiError).slice(0, 300));
+          stillCut = true;
+          break;
+        }
+        return res.status(502).json({ success: false, message: describeGeminiError(apiError) });
+      }
+
+      const fresh = result.questions.filter((q) => {
+        const key = questionKey(q);
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
       });
-    } catch (apiError) {
-      console.error(
-        "Gemini API error during PDF question extraction:",
-        apiError?.status,
-        apiError?.message || apiError,
-      );
-      return res.status(502).json({
-        success: false,
-        message: describeGeminiError(apiError),
-      });
+      allQuestions.push(...fresh);
+
+      if (allQuestions.length === 0 && fresh.length === 0 && emptyRetries < 1) {
+        // Nothing usable on the very first try — one clean retry before failing.
+        emptyRetries++;
+        pass--;
+        continue;
+      }
+
+      if (!result.cut) {
+        stillCut = false;
+        break;
+      }
+      stillCut = true;
+      if (fresh.length === 0) break; // continuation produced nothing new
     }
 
-    // A response cut short by the output-token cap is the most common real
-    // cause of unparseable JSON (a long/dense document, e.g. many questions
-    // or a non-Latin script, produces more output than the cap allows) — a
-    // distinct, actionable case worth telling the admin about specifically,
-    // rather than lumping it into the generic parse-failure message below.
-    const finishReason = response?.candidates?.[0]?.finishReason;
-    if (finishReason === "MAX_TOKENS") {
-      console.error(
-        `Gemini response truncated at the output-token limit (${GEMINI_PDF_MAX_OUTPUT_TOKENS}) during PDF extraction.`,
-      );
-      return res.status(502).json({
-        success: false,
-        message:
-          "This document produced more content than the extraction service could return at once. Try splitting the PDF into smaller sections (e.g. by subject or a portion of the questions) and importing each separately.",
-      });
-    }
-
-    // The SDK exposes the combined text output as a `.text` property (not a
-    // method) on the response in the current @google/genai version — guard
-    // for either shape defensively in case that changes in a future SDK
-    // release.
-    const rawText = typeof response?.text === "function" ? response.text() : response?.text;
-
-    let parsedResponse;
-    try {
-      parsedResponse = JSON.parse(rawText);
-    } catch (parseError) {
-      console.error(
-        "Gemini returned non-JSON output for PDF extraction:",
-        typeof rawText === "string" ? rawText.slice(0, 2000) : rawText,
-      );
-      return res.status(502).json({
-        success: false,
-        message: "The extraction service returned an unexpected response. Please try again.",
-      });
-    }
-
-    const extractedQuestions = parsedResponse?.questions;
-
-    if (!Array.isArray(extractedQuestions) || extractedQuestions.length === 0) {
+    if (allQuestions.length === 0) {
       return res.status(422).json({
         success: false,
         message: "Could not extract any questions from this PDF. Please check the file and try again.",
       });
     }
 
-    const draftQuestions = extractedQuestions.map(buildDraftQuestion);
+    const draftQuestions = allQuestions.map(buildDraftQuestion);
     const withAnswerKey = draftQuestions.filter((q) => q.answerKeyText).length;
 
-    return res.status(200).json({
-      success: true,
-      message: answerKeyBase64
-        ? `Extracted ${draftQuestions.length} question(s), with ${withAnswerKey} answer-key explanation(s) matched from the separate answer key PDF. Review and edit before adding them to the exam.`
-        : `Extracted ${draftQuestions.length} question(s)${withAnswerKey ? ` (${withAnswerKey} with an answer-key explanation found in the document)` : ""}. Review and edit before adding them to the exam.`,
-      draftQuestions,
-    });
+    let message = answerKeyFile
+      ? `Extracted ${draftQuestions.length} question(s), with ${withAnswerKey} answer-key explanation(s) matched from the separate answer key PDF. Review and edit before adding them to the exam.`
+      : `Extracted ${draftQuestions.length} question(s)${withAnswerKey ? ` (${withAnswerKey} with an answer-key explanation found in the document)` : ""}. Review and edit before adding them to the exam.`;
+    if (stillCut) {
+      message += ` Note: the paper was long, so extraction may have stopped early — check the last question against the PDF and import any remaining pages as a separate PDF.`;
+    }
+
+    return res.status(200).json({ success: true, message, draftQuestions });
   } catch (error) {
     console.error("Error extracting questions from PDF:", error);
     return res.status(500).json({
@@ -325,4 +482,8 @@ const extractQuestionsFromPdf = async (req, res) => {
   }
 };
 
-module.exports = { extractQuestionsFromPdf };
+module.exports = {
+  extractQuestionsFromPdf,
+  // Exposed for unit tests only.
+  _internals: { salvageQuestions, classifyGeminiError, generateWithResilience, buildPromptText },
+};
