@@ -120,6 +120,25 @@ const stripLatexForPrint = (input) => {
   if (!input) return "";
   let text = String(input);
 
+  // Matrices: \begin{bmatrix} 3 & 1 \\ 2 & 2 \end{bmatrix} -> [3, 1; 2, 2]
+  // (pmatrix/matrix the same; vmatrix -> |...|). Done first, before the generic
+  // command stripping below would reduce them to the bare word "bmatrix".
+  text = text.replace(
+    /\\begin\{([bpvBV]?matrix)\}([\s\S]*?)\\end\{\1\}/g,
+    (_, kind, body) => {
+      const rows = body
+        .split(/\\\\/)
+        .map((row) => row.split("&").map((cell) => cell.trim()).filter((c) => c !== "").join(", "))
+        .filter((row) => row !== "");
+      const inner = rows.join("; ");
+      return /^v/i.test(kind) ? `|${inner}|` : `[${inner}]`;
+    },
+  );
+  // Common arrows/operators not covered by the symbol table below.
+  text = text.replace(/\\(?:implies|Rightarrow)\b/g, "⇒").replace(/\\Leftrightarrow\b/g, "⇔").replace(/\\iff\b/g, "⇔");
+  text = text.replace(/\\(?:left|right)\b\s*/g, "");
+  text = text.replace(/\\det\b/g, "det");
+
   // Drop the \( \) / \[ \] math delimiters — the content stays, the
   // wrapper goes (nothing downstream needs to know where math "started").
   text = text.replace(/\\[()[\]]/g, "");

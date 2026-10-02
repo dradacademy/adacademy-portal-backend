@@ -1,5 +1,6 @@
 const examModel = require("../models/examModel");
 const questionModel = require("../models/questionModel");
+const { cleanUrlList, getAnswerKeyImageUrls } = require("../utils/answerKeyImages");
 const Subject = require("../models/subjectModel");
 const examSubmissionSchema = require("../models/examSubmissionSchema");
 const examPassModel = require("../models/examPassModel");
@@ -240,7 +241,10 @@ const createExam = async (req, res) => {
           ...resolveNatRangeFields(question),
           image: question.image,
           answerKeyText: question.answerKeyText,
-          answerKeyImage: question.answerKeyImage,
+          ...(() => {
+            const keyImages = getAnswerKeyImageUrls(question);
+            return { answerKeyImages: keyImages, answerKeyImage: keyImages[0] || question.answerKeyImage || null };
+          })(),
         })),
         { session, ordered: true },
       );
@@ -586,7 +590,12 @@ const updateExam = async (req, res) => {
                 ...resolveNatRangeFields(question),
                 image: question.image ?? existingQuestion.image,
                 answerKeyText: question.answerKeyText ?? existingQuestion.answerKeyText,
-                answerKeyImage: question.answerKeyImage ?? existingQuestion.answerKeyImage,
+                ...(Array.isArray(question.answerKeyImages)
+                  ? (() => {
+                      const keyImages = cleanUrlList(question.answerKeyImages);
+                      return { answerKeyImages: keyImages, answerKeyImage: keyImages[0] || null };
+                    })()
+                  : { answerKeyImage: question.answerKeyImage ?? existingQuestion.answerKeyImage }),
               },
             },
             { session },
@@ -611,7 +620,10 @@ const updateExam = async (req, res) => {
                 ...resolveNatRangeFields(question),
                 image: question.image,
                 answerKeyText: question.answerKeyText,
-                answerKeyImage: question.answerKeyImage,
+                ...(() => {
+            const keyImages = getAnswerKeyImageUrls(question);
+            return { answerKeyImages: keyImages, answerKeyImage: keyImages[0] || question.answerKeyImage || null };
+          })(),
               },
             ],
             { session, ordered: true },

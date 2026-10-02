@@ -25,6 +25,7 @@ const {
 } = require("../utils/ExamSubmissionHelper");
 const { stripLatexForPrint, htmlToPlainText } = require("../utils/latexToPlainText");
 const { enableTamilPdfFonts } = require("../utils/tamilPdfFonts");
+const { getAnswerKeyImageUrls } = require("../utils/answerKeyImages");
 
 // Same brand palette as studentProfileController.js's generateProfilePdf —
 // kept as its own local copy (rather than a shared import) since that's
@@ -116,7 +117,7 @@ const collectImageUrls = (questions) => {
   const urls = new Set();
   questions.forEach((q) => {
     if (q.image) urls.add(q.image);
-    if (q.answerKeyImage) urls.add(q.answerKeyImage);
+    getAnswerKeyImageUrls(q).forEach((url) => urls.add(url));
     (q.options || []).forEach((opt) => {
       const img = optionImageOf(opt);
       if (img) urls.add(img);
@@ -343,9 +344,16 @@ const renderExamPdf = (res, data) => {
       : null;
 
     const explanationText = htmlToPlainText(q.answerKeyText);
-    const expImgUrl = q.answerKeyImage;
-    const expImgBuf = expImgUrl ? imageBuffers.get(expImgUrl) : null;
-    const expImgFit = getPdfCompatibleFit(expImgBuf, contentWidth, PDF_IMG_MAX_H);
+    // Answer-key screenshots: every one is drawn full-width (up to a whole page
+    // tall, not the small cap used for question diagrams) so a long worked
+    // solution stays readable, each on its own with its own page-break check.
+    const expImgs = getAnswerKeyImageUrls(q)
+      .map((url) => {
+        const buf = imageBuffers.get(url);
+        const fit = getPdfCompatibleFit(buf, contentWidth, Math.max(PDF_IMG_MAX_H, pageContentHeight - 30));
+        return buf && fit ? { buf, fit } : null;
+      })
+      .filter(Boolean);
 
     // --- Measure (same font/size/width used for the actual draw below) ---
     doc.font("Helvetica-Bold").fontSize(10);
@@ -365,13 +373,12 @@ const renderExamPdf = (res, data) => {
       height += doc.heightOfString(answerLine, { width: contentWidth }) + 6;
     }
 
-    if (explanationText || expImgFit) {
+    if (explanationText || expImgs.length) {
       height += 14; // "Explanation" label
       if (explanationText) {
         doc.font("Helvetica").fontSize(9.5);
         height += doc.heightOfString(explanationText, { width: contentWidth }) + 4;
       }
-      if (expImgFit) height += expImgFit.height + 10;
     }
     height += 16; // bottom divider + spacing
 
@@ -412,17 +419,18 @@ const renderExamPdf = (res, data) => {
       doc.font("Helvetica-Bold").fontSize(9.5).fillColor(GREEN).text(answerLine, { width: contentWidth });
     }
 
-    if (explanationText || expImgFit) {
+    if (explanationText || expImgs.length) {
       doc.moveDown(0.3);
       doc.font("Helvetica-Bold").fontSize(9).fillColor(MUTED_COLOR).text("Explanation", { width: contentWidth });
       if (explanationText) {
         doc.font("Helvetica").fontSize(9.5).fillColor(TEXT_COLOR).text(explanationText, { width: contentWidth });
       }
-      if (expImgFit && expImgBuf) {
+      expImgs.forEach(({ buf, fit }) => {
         doc.moveDown(0.2);
-        doc.image(expImgBuf, doc.page.margins.left, doc.y, { width: expImgFit.width, height: expImgFit.height });
-        doc.y += expImgFit.height + 6;
-      }
+        ensureSpace(fit.height + 10);
+        doc.image(buf, doc.page.margins.left, doc.y, { width: fit.width, height: fit.height });
+        doc.y += fit.height + 6;
+      });
     }
 
     doc.fillColor(TEXT_COLOR).font("Helvetica");
@@ -634,10 +642,11 @@ const buildExamDocx = (data) => {
     }
 
     const explanationText = htmlToPlainText(q.answerKeyText);
-    const expImgUrl = q.answerKeyImage;
-    const expBuf = expImgUrl ? imageBuffers.get(expImgUrl) : null;
+    const expBufs = getAnswerKeyImageUrls(q)
+      .map((url) => imageBuffers.get(url))
+      .filter(Boolean);
 
-    if (explanationText || expBuf) {
+    if (explanationText || expBufs.length) {
       children.push(
         new Paragraph({
           keepNext: true,
@@ -650,17 +659,18 @@ const buildExamDocx = (data) => {
         lines.forEach((line, li) => {
           children.push(
             new Paragraph({
-              keepNext: !!expBuf || li < lines.length - 1,
+              keepNext: expBufs.length > 0 || li < lines.length - 1,
               spacing: { after: li === lines.length - 1 ? 80 : 20 },
               children: [new TextRun({ text: line, size: 20 })],
             }),
           );
         });
       }
-      if (expBuf) {
-        const imgPara = docxImageParagraph(expBuf, DOCX_MAX_IMG_W_PX, 320, 120);
+      // Answer-key screenshots: full width and tall enough to stay readable.
+      expBufs.forEach((buf) => {
+        const imgPara = docxImageParagraph(buf, DOCX_MAX_IMG_W_PX, 880, 120);
         if (imgPara) children.push(imgPara);
-      }
+      });
     }
   });
 

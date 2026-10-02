@@ -107,7 +107,12 @@ const QUESTION_ITEM_SCHEMA = {
     explanation: {
       type: Type.STRING,
       description:
-        "A step-by-step solution/explanation for the correct answer, if one is available anywhere in the source document(s) — printed right after the question, in an answer key/solutions section elsewhere in the same document, or in a separate answer-key document provided alongside the question paper. Matched to this question by its question number/order. Follow the same LaTeX math-delimiter rule as questionText when it contains formulas. Omit this field entirely if no explanation is available for this question — never invent one.",
+        "A step-by-step solution/explanation for the correct answer, if one is available anywhere in the source document(s) — printed right after the question, in an answer key/solutions section elsewhere in the same document, or in a separate answer-key document provided alongside the question paper. Matched to this question by its question number/order. Follow the same LaTeX math-delimiter rule as questionText when it contains formulas. Write it as the FULL worked solution, one step per line (separate steps with a newline character, e.g. \"1. ...\\n2. ...\\n3. ...\"), keeping every formula inside \\( \\) delimiters (a matrix as \\begin{bmatrix} a & b \\\\ c & d \\end{bmatrix}). Omit this field entirely if no explanation is available for this question — never invent one.",
+    },
+    answerKeyConflict: {
+      type: Type.STRING,
+      description:
+        "Set ONLY when the answer key material contradicts itself for this question — for example a quick summary table gives one answer while the worked solution for the same question arrives at a different one. One short sentence stating both answers and which one correctAnswers uses. Omit entirely when there is no contradiction.",
     },
   },
   required: ["questionType", "questionText", "correctAnswers", "level"],
@@ -142,6 +147,8 @@ Rules:
 const ANSWER_KEY_DOCUMENT_NOTE = `A SECOND PDF has also been provided, immediately after the question paper above. It is a SEPARATE answer key / solutions document for the SAME question paper — it does not contain more questions to extract. Match each of its entries to the corresponding question above by question number (both documents are numbered/ordered the same way), and for every question you can match:
 - Prefer the answer key document's stated correct answer for \`correctAnswers\` over guessing from the question paper alone.
 - Use the answer key document's explanation/working, if it gives one, for \`explanation\`.
+- An answer key document often has TWO parts: a quick summary table of final answers at the top AND detailed worked solutions below. Its worked solutions are the authority: take \`correctAnswers\` from the answer each worked solution actually derives (its "Final Answer" line), re-checking the arithmetic yourself when something looks off. If the summary table disagrees with the worked solution for a question, still use the worked solution and describe the disagreement in that question's \`answerKeyConflict\`.
+- Every question normally has a worked solution in that document — look for each question number and fill \`explanation\` for ALL of them, with the full step-by-step working (not a summary), one step per line.
 If the answer key document's numbering doesn't line up cleanly with a question, use your best judgment to match by order; if no reasonable match exists for a given question, just leave that question's \`correctAnswers\` as your best-effort guess and its \`explanation\` omitted rather than fabricating a match.`;
 
 const buildDraftQuestion = (q) => {
@@ -175,6 +182,13 @@ const buildDraftQuestion = (q) => {
         ? q.explanation.trim()
         : null,
     answerKeyImage: null,
+    answerKeyImages: [],
+    // Shown to the admin in the review screen (never saved with the question):
+    // set when the answer key contradicted itself for this question.
+    answerKeyWarning:
+      typeof q.answerKeyConflict === "string" && q.answerKeyConflict.trim()
+        ? q.answerKeyConflict.trim()
+        : null,
   };
 };
 
@@ -483,6 +497,48 @@ const runExtraction = async (batches, promptText) => {
   return { questions: allQuestions, incomplete };
 };
 
+// A separately-uploaded answer key normally has a worked solution for EVERY
+// question, but a single extraction call sometimes returns an explanation for
+// only some of them. This runs one targeted follow-up asking for just the
+// questions that came back without one, and merges the results in place.
+const findCompletionMatch = (question, returned, position, total) => {
+  const key = questionKey(question);
+  const exact = returned.find((r) => questionKey(r) === key);
+  if (exact) return exact;
+  const stem = key.slice(0, 50);
+  const byPrefix = stem && returned.find((r) => questionKey(r).startsWith(stem));
+  if (byPrefix) return byPrefix;
+  return returned.length === total ? returned[position] : null;
+};
+
+const fillMissingExplanations = async (baseParts, questions) => {
+  const hasText = (q) => typeof q.explanation === "string" && q.explanation.trim() !== "";
+  const missing = questions.filter((q) => !hasText(q));
+  if (missing.length === 0) return 0;
+
+  const list = missing
+    .map((q) => `- ${String(q.questionText || "").replace(/\s+/g, " ").slice(0, 140)}`)
+    .join("\n");
+  const text = `${buildPromptText(true)}
+
+EXPLANATION COMPLETION: the separate answer key document contains a worked solution for every question. These questions came back WITHOUT an explanation:
+${list}
+Return ONLY these questions again (same wording, options and correct answers as the question paper), this time with \`explanation\` filled in from the answer key document, matched by question number or by the problem statement. Do not return any other question.`;
+
+  const { questions: returned } = await runExtractionPass([...baseParts, { text }]);
+  let filled = 0;
+  missing.forEach((q, i) => {
+    const hit = findCompletionMatch(q, returned, i, missing.length);
+    if (hit && hasText(hit)) {
+      q.explanation = hit.explanation;
+      if (!q.answerKeyConflict && hit.answerKeyConflict) q.answerKeyConflict = hit.answerKeyConflict;
+      filled++;
+    }
+  });
+  console.log(`Answer key completion pass: ${filled} of ${missing.length} missing explanation(s) filled.`);
+  return filled;
+};
+
 const notConfigured = (res) => {
   console.error("Question import called without GEMINI_API_KEY configured.");
   return res.status(500).json({
@@ -528,12 +584,28 @@ const extractQuestionsFromPdf = async (req, res) => {
       });
     }
 
+    if (answerKeyFile) {
+      try {
+        await fillMissingExplanations(baseParts, outcome.questions);
+      } catch (completionError) {
+        // Never lose the questions we already have because the extra pass failed.
+        console.error("Answer key completion pass failed:", errorText(completionError).slice(0, 300));
+      }
+    }
+
     const draftQuestions = outcome.questions.map(buildDraftQuestion);
     const withAnswerKey = draftQuestions.filter((q) => q.answerKeyText).length;
+    const withConflict = draftQuestions.filter((q) => q.answerKeyWarning).length;
 
     let message = answerKeyFile
       ? `Extracted ${draftQuestions.length} question(s), with ${withAnswerKey} answer-key explanation(s) matched from the separate answer key PDF. Review and edit before adding them to the exam.`
       : `Extracted ${draftQuestions.length} question(s)${withAnswerKey ? ` (${withAnswerKey} with an answer-key explanation found in the document)` : ""}. Review and edit before adding them to the exam.`;
+    if (answerKeyFile && withAnswerKey < draftQuestions.length) {
+      message += ` ${draftQuestions.length - withAnswerKey} question(s) still have no explanation — fill those in manually.`;
+    }
+    if (withConflict > 0) {
+      message += ` ${withConflict} question(s) have an answer key that contradicts itself — they are marked in amber; please check them.`;
+    }
     if (outcome.incomplete) {
       message += ` Note: the paper was long, so extraction may have stopped early — check the last question against the PDF and import any remaining pages as a separate PDF.`;
     }
@@ -635,6 +707,10 @@ const extractQuestionsFromImages = async (req, res) => {
     const withAnswerKey = draftQuestions.filter((q) => q.answerKeyText).length;
 
     let message = `Extracted ${draftQuestions.length} question(s) from ${files.length} screenshot(s)${withAnswerKey ? ` (${withAnswerKey} with an answer-key explanation)` : ""}. Review and edit before adding them to the exam.`;
+    const shotConflicts = draftQuestions.filter((q) => q.answerKeyWarning).length;
+    if (shotConflicts > 0) {
+      message += ` ${shotConflicts} question(s) have an answer key that contradicts itself — they are marked in amber; please check them.`;
+    }
     if (outcome.incomplete) {
       message += " Note: extraction may have stopped early — check the last question against your screenshots and import any remaining ones separately.";
     }
@@ -653,6 +729,8 @@ module.exports = {
   extractQuestionsFromImages,
   // Exposed for unit tests only.
   _internals: {
+    fillMissingExplanations,
+    buildDraftQuestion,
     salvageQuestions,
     classifyGeminiError,
     generateWithResilience,

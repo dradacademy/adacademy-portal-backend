@@ -127,6 +127,13 @@ const QuestionSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
+    // Ordered list of answer-key screenshots (a long solution can be split over
+    // several readable images). answerKeyImage above always mirrors the first
+    // entry, so older code and older questions keep working unchanged.
+    answerKeyImages: {
+      type: [String],
+      default: [],
+    },
   },
   {
     timestamps: true,
