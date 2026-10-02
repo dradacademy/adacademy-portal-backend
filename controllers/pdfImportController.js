@@ -422,45 +422,24 @@ const describeGeminiError = (apiError) => {
   return `Failed to reach the question-extraction service: ${rawMessage || "unknown error"}. Please try again.`;
 };
 
-// Extracts structured draft questions from an admin-uploaded PDF question
-// paper using the Gemini API. This never writes to the database — the admin
-// reviews/edits the returned draftQuestions client-side and only explicit
-// confirmation merges them into the normal exam create/update flow.
-const extractQuestionsFromPdf = async (req, res) => {
-  try {
-    // questionImportRoute.js uses upload.fields([...]), so files arrive as
-    // req.files.<fieldname>[0]. "file" (the question paper) is required;
-    // "answerKeyFile" (a separate answer key/solutions PDF) is optional.
-    const questionFile = req.files?.file?.[0];
-    const answerKeyFile = req.files?.answerKeyFile?.[0];
+// ---------------------------------------------------------------------------
+// Shared extraction engine, used by both the PDF endpoint and the screenshot
+// endpoint. `batches` is an array of "parts" arrays (one Gemini call group
+// each): a PDF is a single batch, screenshots are split into several batches
+// so any number of screenshots can be imported without hitting request-size
+// limits. Questions found in earlier batches are passed forward as a
+// "continuation" note so a question that spans two batches isn't duplicated.
+// Returns { questions, incomplete } or { error: { status, message } }.
+// ---------------------------------------------------------------------------
+const runExtraction = async (batches, promptText) => {
+  const allQuestions = [];
+  const seen = new Set();
+  let incomplete = false;
+  let emptyRetries = 0;
 
-    if (!questionFile) {
-      return res.status(400).json({ success: false, message: "No PDF file uploaded." });
-    }
-
-    if (buildAttemptPlan().length === 0) {
-      console.error("PDF import called without GEMINI_API_KEY configured.");
-      return res.status(500).json({
-        success: false,
-        message: "PDF import is not configured on the server yet. Please contact the administrator.",
-      });
-    }
-
-    const baseParts = [
-      { inlineData: { mimeType: "application/pdf", data: questionFile.buffer.toString("base64") } },
-    ];
-    if (answerKeyFile) {
-      baseParts.push({
-        inlineData: { mimeType: "application/pdf", data: answerKeyFile.buffer.toString("base64") },
-      });
-    }
-    const promptText = buildPromptText(Boolean(answerKeyFile));
-
-    const allQuestions = [];
-    const seen = new Set();
-    let stillCut = false;
-    let emptyRetries = 0;
+  for (let b = 0; b < batches.length; b++) {
     let pass = 0;
+    let lastCut = false;
 
     while (pass < MAX_PASSES) {
       pass++;
@@ -468,15 +447,14 @@ const extractQuestionsFromPdf = async (req, res) => {
 
       let result;
       try {
-        result = await runExtractionPass([...baseParts, { text }]);
+        result = await runExtractionPass([...batches[b], { text }]);
       } catch (apiError) {
         if (allQuestions.length > 0) {
           // Keep what we already have instead of throwing it all away.
           console.error("Later extraction pass failed; returning partial results:", errorText(apiError).slice(0, 300));
-          stillCut = true;
-          break;
+          return { questions: allQuestions, incomplete: true };
         }
-        return res.status(502).json({ success: false, message: describeGeminiError(apiError) });
+        return { error: { status: 502, message: describeGeminiError(apiError) } };
       }
 
       const fresh = result.questions.filter((q) => {
@@ -494,28 +472,69 @@ const extractQuestionsFromPdf = async (req, res) => {
         continue;
       }
 
-      if (!result.cut) {
-        stillCut = false;
-        break;
-      }
-      stillCut = true;
+      lastCut = result.cut;
+      if (!result.cut) break;
       if (fresh.length === 0) break; // continuation produced nothing new
     }
 
-    if (allQuestions.length === 0) {
+    if (lastCut) incomplete = true;
+  }
+
+  return { questions: allQuestions, incomplete };
+};
+
+const notConfigured = (res) => {
+  console.error("Question import called without GEMINI_API_KEY configured.");
+  return res.status(500).json({
+    success: false,
+    message: "Question import is not configured on the server yet. Please contact the administrator.",
+  });
+};
+
+// Extracts structured draft questions from an admin-uploaded PDF question
+// paper using the Gemini API. This never writes to the database — the admin
+// reviews/edits the returned draftQuestions client-side and only explicit
+// confirmation merges them into the normal exam create/update flow.
+const extractQuestionsFromPdf = async (req, res) => {
+  try {
+    // questionImportRoute.js uses upload.fields([...]), so files arrive as
+    // req.files.<fieldname>[0]. "file" (the question paper) is required;
+    // "answerKeyFile" (a separate answer key/solutions PDF) is optional.
+    const questionFile = req.files?.file?.[0];
+    const answerKeyFile = req.files?.answerKeyFile?.[0];
+
+    if (!questionFile) {
+      return res.status(400).json({ success: false, message: "No PDF file uploaded." });
+    }
+    if (buildAttemptPlan().length === 0) return notConfigured(res);
+
+    const baseParts = [
+      { inlineData: { mimeType: "application/pdf", data: questionFile.buffer.toString("base64") } },
+    ];
+    if (answerKeyFile) {
+      baseParts.push({
+        inlineData: { mimeType: "application/pdf", data: answerKeyFile.buffer.toString("base64") },
+      });
+    }
+
+    const outcome = await runExtraction([baseParts], buildPromptText(Boolean(answerKeyFile)));
+    if (outcome.error) {
+      return res.status(outcome.error.status).json({ success: false, message: outcome.error.message });
+    }
+    if (outcome.questions.length === 0) {
       return res.status(422).json({
         success: false,
         message: "Could not extract any questions from this PDF. Please check the file and try again.",
       });
     }
 
-    const draftQuestions = allQuestions.map(buildDraftQuestion);
+    const draftQuestions = outcome.questions.map(buildDraftQuestion);
     const withAnswerKey = draftQuestions.filter((q) => q.answerKeyText).length;
 
     let message = answerKeyFile
       ? `Extracted ${draftQuestions.length} question(s), with ${withAnswerKey} answer-key explanation(s) matched from the separate answer key PDF. Review and edit before adding them to the exam.`
       : `Extracted ${draftQuestions.length} question(s)${withAnswerKey ? ` (${withAnswerKey} with an answer-key explanation found in the document)` : ""}. Review and edit before adding them to the exam.`;
-    if (stillCut) {
+    if (outcome.incomplete) {
       message += ` Note: the paper was long, so extraction may have stopped early — check the last question against the PDF and import any remaining pages as a separate PDF.`;
     }
 
@@ -529,8 +548,118 @@ const extractQuestionsFromPdf = async (req, res) => {
   }
 };
 
+// ---------------------------------------------------------------------------
+// Screenshot import: the admin pastes / uploads any number of screenshots of a
+// question paper (in order) and they are read exactly like a PDF.
+// ---------------------------------------------------------------------------
+const IMAGES_NOTE = `INPUT FORMAT: the paper was captured as a series of SCREENSHOTS (not a PDF). Each one is labelled "Screenshot k of N" in the order the admin captured them. Treat them as consecutive pages of ONE question paper:
+- A question, or its options, may continue from the bottom of one screenshot onto the top of the next — join them into a single question. Screenshots may also overlap and show the same question twice — extract it only once.
+- Ignore browser/app chrome, taskbars, watermarks, page numbers, ads and cursor marks.
+- A screenshot labelled "context only" was already processed in an earlier batch. Use it only to complete a question that continues onto the following screenshots; do NOT extract questions that were fully visible in it again.
+- If a question depends on a diagram or figure, still extract the question text exactly as written; never invent the figure's content.
+- If part of a screenshot is blurry or cut off, extract only what is actually readable; never guess missing words or options.
+- If some screenshots show an answer key or solutions, use them to fill correctAnswers and answerKeyText for the matching question numbers instead of guessing.`;
+
+const buildImagePromptText = () => [EXTRACTION_PROMPT_BASE, LANGUAGE_NOTE, IMAGES_NOTE].join("\n\n");
+
+// Screenshots per Gemini call, and a byte ceiling per call (Gemini limits the
+// total inline request size, so big screenshots get split across calls).
+const IMAGE_BATCH_SIZE = parseInt(process.env.GEMINI_IMAGE_BATCH_SIZE, 10) || 8;
+const IMAGE_BATCH_MAX_BYTES = 12 * 1024 * 1024;
+const MAX_IMAGES = 40;
+
+const makeImageBatches = (files) => {
+  const batches = [];
+  let current = [];
+  let bytes = 0;
+  files.forEach((file, index) => {
+    if (current.length && (current.length >= IMAGE_BATCH_SIZE || bytes + file.buffer.length > IMAGE_BATCH_MAX_BYTES)) {
+      batches.push(current);
+      current = [];
+      bytes = 0;
+    }
+    current.push({ file, index });
+    bytes += file.buffer.length;
+  });
+  if (current.length) batches.push(current);
+  return batches;
+};
+
+const imagePart = (file) => ({
+  inlineData: { mimeType: file.mimetype, data: file.buffer.toString("base64") },
+});
+
+// Each batch after the first re-includes the previous batch's last screenshot
+// as "context only", so a question that straddles two batches is read whole.
+const buildImageBatchParts = (batches, total) =>
+  batches.map((batch, i) => {
+    const parts = [];
+    if (i > 0) {
+      const prev = batches[i - 1][batches[i - 1].length - 1];
+      parts.push({ text: `Screenshot ${prev.index + 1} of ${total} (context only — already processed in the previous batch):` });
+      parts.push(imagePart(prev.file));
+    }
+    batch.forEach(({ file, index }) => {
+      parts.push({ text: `Screenshot ${index + 1} of ${total}:` });
+      parts.push(imagePart(file));
+    });
+    return parts;
+  });
+
+const extractQuestionsFromImages = async (req, res) => {
+  try {
+    const files = Array.isArray(req.files) ? req.files : [];
+    if (files.length === 0) {
+      return res.status(400).json({ success: false, message: "No screenshots uploaded." });
+    }
+    if (files.length > MAX_IMAGES) {
+      return res.status(400).json({ success: false, message: `Too many screenshots. Please upload at most ${MAX_IMAGES} at a time.` });
+    }
+    if (buildAttemptPlan().length === 0) return notConfigured(res);
+
+    const batches = makeImageBatches(files);
+    const batchParts = buildImageBatchParts(batches, files.length);
+
+    const outcome = await runExtraction(batchParts, buildImagePromptText());
+    if (outcome.error) {
+      return res.status(outcome.error.status).json({ success: false, message: outcome.error.message });
+    }
+    if (outcome.questions.length === 0) {
+      return res.status(422).json({
+        success: false,
+        message: "Could not read any questions from these screenshots. Make sure the text is clear and fully visible, then try again.",
+      });
+    }
+
+    const draftQuestions = outcome.questions.map(buildDraftQuestion);
+    const withAnswerKey = draftQuestions.filter((q) => q.answerKeyText).length;
+
+    let message = `Extracted ${draftQuestions.length} question(s) from ${files.length} screenshot(s)${withAnswerKey ? ` (${withAnswerKey} with an answer-key explanation)` : ""}. Review and edit before adding them to the exam.`;
+    if (outcome.incomplete) {
+      message += " Note: extraction may have stopped early — check the last question against your screenshots and import any remaining ones separately.";
+    }
+    return res.status(200).json({ success: true, message, draftQuestions });
+  } catch (error) {
+    console.error("Error extracting questions from screenshots:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong while extracting questions from the screenshots.",
+    });
+  }
+};
+
 module.exports = {
   extractQuestionsFromPdf,
+  extractQuestionsFromImages,
   // Exposed for unit tests only.
-  _internals: { salvageQuestions, classifyGeminiError, generateWithResilience, buildPromptText, buildAttemptPlan },
+  _internals: {
+    salvageQuestions,
+    classifyGeminiError,
+    generateWithResilience,
+    buildPromptText,
+    buildAttemptPlan,
+    makeImageBatches,
+    buildImageBatchParts,
+    buildImagePromptText,
+  },
 };

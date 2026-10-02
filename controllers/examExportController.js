@@ -24,6 +24,7 @@ const {
   calculateTotalPossibleMarks,
 } = require("../utils/ExamSubmissionHelper");
 const { stripLatexForPrint, htmlToPlainText } = require("../utils/latexToPlainText");
+const { enableTamilPdfFonts } = require("../utils/tamilPdfFonts");
 
 // Same brand palette as studentProfileController.js's generateProfilePdf —
 // kept as its own local copy (rather than a shared import) since that's
@@ -229,6 +230,7 @@ const renderExamPdf = (res, data) => {
     margins: { top: HEADER_H + 20, bottom: 40, left: 40, right: 40 },
     bufferPages: true,
   });
+  enableTamilPdfFonts(doc); // Tamil lines switch to Noto Sans Tamil; English stays Helvetica
 
   const safeName = String(exam.examCode || "exam").replace(/[^a-z0-9]+/gi, "-").toLowerCase();
   res.setHeader("Content-Type", "application/pdf");
@@ -663,6 +665,15 @@ const buildExamDocx = (data) => {
   });
 
   return new Document({
+    styles: {
+      default: {
+        document: {
+          // Latin text keeps Calibri; Tamil (a complex script) uses Nirmala UI,
+          // which ships with Windows/Office. Word falls back gracefully on Mac.
+          run: { font: { ascii: "Calibri", hAnsi: "Calibri", cs: "Nirmala UI" } },
+        },
+      },
+    },
     sections: [
       {
         properties: {
