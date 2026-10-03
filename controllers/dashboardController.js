@@ -580,7 +580,11 @@ const getExamDetailedAnalysis = async (req, res) => {
 const getAllStudentsOverview = async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 50;
+    // The admin Student Dashboard page doesn't send ?page/?limit and has no
+    // page controls, so a small default silently hid every student past
+    // the first page. Default to returning everyone (callers can still
+    // pass ?limit to page explicitly).
+    const limit = parseInt(req.query.limit) || 10000;
     const skip = (page - 1) * limit;
 
     // Fetch mark configuration
