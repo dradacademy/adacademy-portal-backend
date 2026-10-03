@@ -96,6 +96,7 @@ app.set("trust proxy", 1);
   app.use("/api/attendance", require("./routes/attendanceRoute"));
   app.use("/api/notifications", require("./routes/notificationRoute"));
   app.use("/api/enrollments", require("./routes/enrollmentRoute"));
+  app.use("/api/data-deletion", require("./routes/dataDeletionRoute"));
   app.use("/api/attachments", require("./routes/attachmentRoute"));
   app.use("/api/answer-sheets", require("./routes/answerSheetRoute"));
   app.use("/api/student-progress", require("./routes/studentProgressRoute"));
