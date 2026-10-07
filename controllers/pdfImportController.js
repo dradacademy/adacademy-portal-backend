@@ -54,6 +54,82 @@ const FREE_RETRY_DELAYS_MS = String(process.env.GEMINI_FREE_RETRY_DELAYS_MS || "
 // found in practice to truncate mid-response on a real TNPSC paper, which
 // then failed to parse as JSON. Raised generously and made configurable in
 // case a future model has a different real ceiling.
+// ---------------------------------------------------------------------------
+// Time budget — protects PAID credits.
+// The browser/Railway gives up on a request after ~5 minutes (HTTP 499 at
+// exactly 300 s, seen in Railway logs 2026-10-07). Before this budget existed,
+// a slow/hung FREE-key attempt (Google 503s, or a "fetch failed" that hung for
+// the SDK's default 5 minutes) used up the whole window, the page stopped
+// waiting, and only THEN did the PAID key run — Google charged for a result
+// nobody could ever receive. Each retry click repeated it.
+// Rules now:
+//   - the whole request must finish within REQUEST_DEADLINE_MS;
+//   - a paid (charged) call is only STARTED if at least MIN_PAID_WINDOW_MS is
+//     left, so its answer can still reach the page — otherwise we stop with a
+//     clear "not charged" message instead;
+//   - the free key's attempts are time-limited so they always leave that
+//     window free for the paid key;
+//   - if the admin closes the page / the browser gives up, no new call starts.
+// Note (from the SDK docs): cancelling a call that Google has already started
+// does NOT refund it, which is why the rule is "don't start", not "cancel".
+// ---------------------------------------------------------------------------
+const REQUEST_DEADLINE_MS = parseInt(process.env.GEMINI_REQUEST_DEADLINE_MS, 10) || 285000;
+const MIN_PAID_WINDOW_MS = parseInt(process.env.GEMINI_MIN_PAID_WINDOW_MS, 10) || 150000;
+const FREE_CALL_TIMEOUT_MS = parseInt(process.env.GEMINI_FREE_CALL_TIMEOUT_MS, 10) || 120000;
+const MIN_FREE_ATTEMPT_MS = parseInt(process.env.GEMINI_MIN_FREE_ATTEMPT_MS, 10) || 15000;
+
+const makeOutOfTimeError = () => {
+  const err = new Error(
+    "Google's AI service was too slow/busy to finish in time, so the import was stopped BEFORE using a paid call — this attempt was not charged. Please try again in a few minutes.",
+  );
+  err.code = "OUT_OF_TIME";
+  return err;
+};
+
+// Used when the final key's call itself was started but Google did not answer
+// in time — it may have been charged, so this message makes no promise.
+const makeTooSlowError = () => {
+  const err = new Error(
+    "Google's AI took too long to reply, so the import was stopped at about 4½ minutes instead of leaving the page loading forever. Please try again in a few minutes; if it keeps happening, split the PDF into smaller parts.",
+  );
+  err.code = "OUT_OF_TIME";
+  return err;
+};
+
+const makeClientGoneError = () => {
+  const err = new Error("The page stopped waiting for this import, so no further AI calls were made.");
+  err.code = "CLIENT_GONE";
+  return err;
+};
+
+// Per-request budget: deadline + "has the browser gone away?" signal.
+const createBudget = (req, res) => {
+  const startedAt = Date.now();
+  const controller = new AbortController();
+  const onClose = () => {
+    if (!res.writableEnded) controller.abort();
+  };
+  res.on("close", onClose);
+  return {
+    deadline: startedAt + REQUEST_DEADLINE_MS,
+    signal: controller.signal,
+    remaining() {
+      return this.deadline - Date.now();
+    },
+    isCancelled() {
+      return controller.signal.aborted;
+    },
+  };
+};
+
+// Requests made without a budget (unit tests) behave as before.
+const NO_BUDGET = {
+  deadline: Infinity,
+  signal: undefined,
+  remaining: () => Infinity,
+  isCancelled: () => false,
+};
+
 const GEMINI_PDF_MAX_OUTPUT_TOKENS = parseInt(process.env.GEMINI_PDF_MAX_OUTPUT_TOKENS, 10) || 65536;
 
 // Gemini's structured-output schema uses the SDK's own Type enum (rather
@@ -239,7 +315,7 @@ const classifyGeminiError = (e) => {
   if (status === 429 || /RESOURCE_EXHAUSTED/i.test(text)) return "next-model";
   if (
     [500, 502, 503, 504].includes(status) ||
-    /UNAVAILABLE|high demand|overloaded|ECONNRESET|ETIMEDOUT|fetch failed|socket hang up/i.test(text)
+    /UNAVAILABLE|high demand|overloaded|ECONNRESET|ETIMEDOUT|fetch failed|socket hang up|abort|timed? ?out/i.test(text)
   ) {
     return "transient";
   }
@@ -274,7 +350,9 @@ const buildAttemptPlan = () => {
 };
 
 const generateWithResilience = async (parts, usageContext = {}) => {
+  const budget = usageContext.budget || NO_BUDGET;
   const plan = buildAttemptPlan();
+  let finalCallStarted = false;
   if (plan.length === 0) {
     const err = new Error("No Gemini API key is configured on the server.");
     err.code = "MISSING_API_KEY";
@@ -289,6 +367,27 @@ const generateWithResilience = async (parts, usageContext = {}) => {
 
     for (const model of step.models) {
       for (let attempt = 1; attempt <= step.delays.length + 1; attempt++) {
+        if (budget.isCancelled()) throw makeClientGoneError();
+
+        // How long this attempt may run. A non-final step (the free key when a
+        // paid key exists) must leave MIN_PAID_WINDOW_MS for the paid key; the
+        // final step only starts if its answer can still reach the page.
+        const remaining = budget.remaining();
+        let callTimeout;
+        if (!isLastStep) {
+          callTimeout = Math.min(FREE_CALL_TIMEOUT_MS, remaining - MIN_PAID_WINDOW_MS - 5000);
+          if (callTimeout < MIN_FREE_ATTEMPT_MS) break; // hand over to the paid key now
+        } else {
+          if (remaining < MIN_PAID_WINDOW_MS) {
+            console.warn(
+              `Skipping Gemini call on ${step.label} (model ${model}): only ${Math.round(remaining / 1000)}s left — would finish after the page stopped waiting.`,
+            );
+            throw finalCallStarted ? makeTooSlowError() : makeOutOfTimeError();
+          }
+          callTimeout = remaining - 3000;
+          finalCallStarted = true;
+        }
+
         try {
           const response = await client.models.generateContent({
             model,
@@ -298,6 +397,8 @@ const generateWithResilience = async (parts, usageContext = {}) => {
               responseSchema: EXTRACTION_RESPONSE_SCHEMA,
               maxOutputTokens: GEMINI_PDF_MAX_OUTPUT_TOKENS,
               temperature: 0,
+              ...(Number.isFinite(callTimeout) ? { httpOptions: { timeout: callTimeout } } : {}),
+              ...(budget.signal ? { abortSignal: budget.signal } : {}),
             },
           });
           if (stepIndex > 0) console.log(`PDF extraction succeeded via ${step.label} (model ${model}).`);
@@ -305,6 +406,7 @@ const generateWithResilience = async (parts, usageContext = {}) => {
           recordAiUsage({ response, model, keyLabel: step.label, source: usageContext.source, userId: usageContext.userId });
           return { response, model };
         } catch (e) {
+          if (budget.isCancelled()) throw makeClientGoneError();
           lastError = e;
           const kind = classifyGeminiError(e);
           console.error(
@@ -318,6 +420,7 @@ const generateWithResilience = async (parts, usageContext = {}) => {
             break;
           }
           if (kind === "transient" && attempt <= step.delays.length) {
+            if (budget.remaining() - step.delays[attempt - 1] <= MIN_PAID_WINDOW_MS && !isLastStep) break;
             await sleep(step.delays[attempt - 1]);
             continue;
           }
@@ -424,6 +527,7 @@ const runExtractionPass = async (parts, usageContext = {}) => {
 // Builds a clear, specific message from a Gemini SDK error instead of a
 // generic "try again" — a real problem must be diagnosable from the toast.
 const describeGeminiError = (apiError) => {
+  if (apiError?.code === "OUT_OF_TIME" || apiError?.code === "CLIENT_GONE") return apiError.message;
   const status = errorStatus(apiError);
   const rawMessage = errorText(apiError);
 
@@ -465,6 +569,13 @@ const runExtraction = async (batches, promptText, usageContext = {}) => {
     let lastCut = false;
 
     while (pass < MAX_PASSES) {
+      const budget = usageContext.budget || NO_BUDGET;
+      if (allQuestions.length > 0 && (budget.isCancelled() || budget.remaining() < MIN_PAID_WINDOW_MS)) {
+        // Keep what we have; don't start another (possibly charged) pass
+        // whose answer could no longer reach the page.
+        incomplete = true;
+        break;
+      }
       pass++;
       const text = allQuestions.length ? `${promptText}\n\n${continuationNote(allQuestions)}` : promptText;
 
@@ -524,6 +635,11 @@ const fillMissingExplanations = async (baseParts, questions, usageContext = {}) 
   const hasText = (q) => typeof q.explanation === "string" && q.explanation.trim() !== "";
   const missing = questions.filter((q) => !hasText(q));
   if (missing.length === 0) return 0;
+  const budget = usageContext.budget || NO_BUDGET;
+  if (budget.isCancelled() || budget.remaining() < MIN_PAID_WINDOW_MS) {
+    console.warn(`Skipping answer-key completion pass (${missing.length} missing): not enough time left.`);
+    return 0;
+  }
 
   const list = missing
     .map((q) => `- ${String(q.questionText || "").replace(/\s+/g, " ").slice(0, 140)}`)
@@ -582,8 +698,10 @@ const extractQuestionsFromPdf = async (req, res) => {
       });
     }
 
-    const usageContext = { source: "pdf", userId: req.user?._id };
+    const budget = createBudget(req, res);
+    const usageContext = { source: "pdf", userId: req.user?._id, budget };
     const outcome = await runExtraction([baseParts], buildPromptText(Boolean(answerKeyFile)), usageContext);
+    if (budget.isCancelled()) return undefined; // page already stopped waiting
     if (outcome.error) {
       return res.status(outcome.error.status).json({ success: false, message: outcome.error.message });
     }
@@ -702,7 +820,13 @@ const extractQuestionsFromImages = async (req, res) => {
     const batches = makeImageBatches(files);
     const batchParts = buildImageBatchParts(batches, files.length);
 
-    const outcome = await runExtraction(batchParts, buildImagePromptText(), { source: "images", userId: req.user?._id });
+    const budget = createBudget(req, res);
+    const outcome = await runExtraction(batchParts, buildImagePromptText(), {
+      source: "images",
+      userId: req.user?._id,
+      budget,
+    });
+    if (budget.isCancelled()) return undefined; // page already stopped waiting
     if (outcome.error) {
       return res.status(outcome.error.status).json({ success: false, message: outcome.error.message });
     }
