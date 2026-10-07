@@ -225,10 +225,16 @@ const loginUser = async (req, res) => {
     if (!isPasswordCorrect) {
       return res.status(400).json({ error: "Invalid credentials" });
     }
+    // Stay-logged-in: the token lasts until the user presses Logout (which
+    // clears sessionToken server-side), logs in on another device (single-
+    // session rule), or is disabled by the admin — all three revoke it
+    // immediately via verifyToken's sessionToken check, regardless of this
+    // expiry. The expiry is only a long safety backstop. Override with the
+    // JWT_EXPIRES_IN Railway variable (e.g. "30d") if ever wanted shorter.
     const token = jwt.sign(
       { userId: user._id, role: user.role },
       process.env.JWT_SECRET,
-      { expiresIn: "2d" }
+      { expiresIn: process.env.JWT_EXPIRES_IN || "180d" }
     );
 
     const now = new Date();
