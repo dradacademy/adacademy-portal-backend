@@ -59,6 +59,13 @@ const liveClassSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    // Optional real class length set by the admin (Edit Live Class). When
+    // set, it is used instead of the Go Live -> End Live time for attendance
+    // (see utils/liveSession.js) — e.g. when End Live was pressed late.
+    durationSeconds: {
+      type: Number,
+      default: null,
+    },
   },
   { timestamps: true }
 );

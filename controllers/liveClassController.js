@@ -1,4 +1,10 @@
 const liveClassModel = require("../models/liveClassModel");
+const {
+  MAX_LIVE_SECONDS,
+  elapsedSeconds,
+  loadManualRecordingLengths,
+  liveSessionLength,
+} = require("../utils/liveSession");
 const { buildPingUpdate, liveWatchStats } = require("../utils/watchTime");
 const liveAttendanceModel = require("../models/liveAttendanceModel");
 const enrollmentModel = require("../models/enrollmentModel");
@@ -36,7 +42,9 @@ const addRecordingFromLiveClass = async (liveClass, userId) => {
       subject: liveClass.subject || null,
       youtubeVideoId: liveClass.youtubeVideoId,
       recordedDate: liveClass.startedAt || new Date(),
-      durationSeconds: liveClass.endedAt ? liveClass.getElapsedSeconds() : null,
+      durationSeconds: liveClass.endedAt
+        ? liveSessionLength(liveClass, await loadManualRecordingLengths([liveClass])).seconds
+        : null,
       uploadedBy: userId || liveClass.startedBy || null,
       sourceLiveClassId: liveClass._id,
     });
@@ -54,6 +62,27 @@ const addRecordingFromLiveClass = async (liveClass, userId) => {
   } catch (error) {
     console.error("Auto-add to Recorded Classes failed:", error.name, error.message);
     return { recordedClass: null, created: false, error: error.message };
+  }
+};
+
+// A class left "live" longer than LIVE_CLASS_MAX_HOURS (default 6h) is
+// ended automatically, at start + 6h, and added to Recorded Classes like a
+// normal End Live — so a forgotten End Live can't keep it "live" for days.
+// Runs whenever the admin or a student loads the live class lists.
+const autoEndOverdueLiveClasses = async (category) => {
+  try {
+    const cutoff = new Date(Date.now() - MAX_LIVE_SECONDS * 1000);
+    const filter = { active: true, startedAt: { $lt: cutoff } };
+    if (category) filter.category = category;
+    const overdue = await liveClassModel.find(filter);
+    for (const lc of overdue) {
+      lc.active = false;
+      lc.endedAt = new Date(new Date(lc.startedAt).getTime() + MAX_LIVE_SECONDS * 1000);
+      await lc.save();
+      await addRecordingFromLiveClass(lc, lc.startedBy);
+    }
+  } catch (error) {
+    console.error("Auto-end of overdue live classes failed:", error.message);
   }
 };
 
@@ -124,9 +153,15 @@ const startLiveClass = async (req, res) => {
 const updateLiveClass = async (req, res) => {
   try {
     const { id } = req.params;
-    const { title, category, subject, youtubeUrl } = req.body;
+    const { title, category, subject, youtubeUrl, durationMinutes } = req.body;
 
     const update = {};
+    // Real class length in minutes (blank/0 clears it -> automatic length).
+    if (durationMinutes !== undefined) {
+      const minutes = Number(durationMinutes);
+      update.durationSeconds =
+        Number.isFinite(minutes) && minutes > 0 ? Math.round(minutes * 60) : null;
+    }
     if (title !== undefined) update.title = title;
     if (category !== undefined) update.category = category;
     if (subject !== undefined) update.subject = subject || null;
@@ -149,12 +184,20 @@ const updateLiveClass = async (req, res) => {
       return res.status(404).json({ success: false, message: "Live class not found." });
     }
 
-    // Keep the auto-added recording (if any) pointing at the corrected
-    // YouTube link too.
-    if (update.youtubeVideoId) {
+    // Keep the auto-added recording (if any) in step: same YouTube link,
+    // and the corrected class length.
+    const recordingUpdate = {};
+    if (update.youtubeVideoId) recordingUpdate.youtubeVideoId = update.youtubeVideoId;
+    if (durationMinutes !== undefined && !liveClass.active) {
+      recordingUpdate.durationSeconds = liveSessionLength(
+        liveClass,
+        await loadManualRecordingLengths([liveClass])
+      ).seconds;
+    }
+    if (Object.keys(recordingUpdate).length) {
       await recordedClassModel.updateMany(
         { sourceLiveClassId: liveClass._id },
-        { $set: { youtubeVideoId: update.youtubeVideoId } }
+        { $set: recordingUpdate }
       );
     }
 
@@ -219,6 +262,8 @@ const listLiveClasses = async (req, res) => {
     const { category } = req.query;
     const filter = category ? { category } : {};
 
+    await autoEndOverdueLiveClasses(category);
+
     const liveClasses = await liveClassModel
       .find(filter)
       .populate("subject", "name")
@@ -226,7 +271,32 @@ const listLiveClasses = async (req, res) => {
       .sort({ startedAt: -1 })
       .limit(50);
 
-    res.status(200).json({ success: true, data: liveClasses });
+    const manualLengths = await loadManualRecordingLengths(liveClasses);
+
+    // Repair recordings that were auto-added with the old, inflated
+    // "Go Live -> End Live" length (only if nobody has edited them since).
+    for (const lc of liveClasses) {
+      if (lc.active || !lc.endedAt) continue;
+      const { seconds } = liveSessionLength(lc, manualLengths);
+      const raw = elapsedSeconds(lc);
+      if (raw !== seconds) {
+        await recordedClassModel.updateMany(
+          { sourceLiveClassId: lc._id, durationSeconds: raw },
+          { $set: { durationSeconds: seconds } }
+        );
+      }
+    }
+
+    const data = liveClasses.map((lc) => {
+      const length = liveSessionLength(lc, manualLengths);
+      return {
+        ...lc.toObject(),
+        lengthSeconds: length.seconds,
+        lengthSource: length.source,
+      };
+    });
+
+    res.status(200).json({ success: true, data });
   } catch (error) {
     res.status(500).json({
       success: false,
@@ -248,6 +318,8 @@ const listCurrentLiveClasses = async (req, res) => {
     if (!req.user.category) {
       return res.status(200).json({ success: true, data: [] });
     }
+
+    await autoEndOverdueLiveClasses(req.user.category);
 
     const [liveClasses, enrollment] = await Promise.all([
       liveClassModel
@@ -396,8 +468,9 @@ const getLiveAttendanceReport = async (req, res) => {
     if (liveClassId) liveClassFilter._id = liveClassId;
 
     const liveClasses = await liveClassModel.find(liveClassFilter).select(
-      "title category startedAt endedAt active"
+      "title category startedAt endedAt active durationSeconds youtubeVideoId"
     );
+    const manualLengths = await loadManualRecordingLengths(liveClasses);
     const liveClassIds = liveClasses.map((lc) => lc._id);
     const liveClassById = new Map(liveClasses.map((lc) => [lc._id.toString(), lc]));
 
@@ -410,7 +483,7 @@ const getLiveAttendanceReport = async (req, res) => {
       .filter((row) => row.userId && liveClassById.has(row.liveClassId.toString()))
       .map((row) => {
         const liveClass = liveClassById.get(row.liveClassId.toString());
-        const durationSeconds = liveClass.getElapsedSeconds();
+        const durationSeconds = liveSessionLength(liveClass, manualLengths).seconds;
         const stats = liveWatchStats(row, durationSeconds);
         const watchPercent = stats.percentWatched;
 

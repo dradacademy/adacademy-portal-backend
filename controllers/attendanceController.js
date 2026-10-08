@@ -4,6 +4,7 @@ const liveAttendanceModel = require("../models/liveAttendanceModel");
 const liveClassModel = require("../models/liveClassModel");
 const { getAttendanceStatus } = require("../utils/attendanceHelper");
 const { recordedWatchStats, liveWatchStats } = require("../utils/watchTime");
+const { loadManualRecordingLengths, liveSessionLength } = require("../utils/liveSession");
 
 // GET /api/attendance/report (admin only) — the combined report the admin
 // asked for: "Student Name | Video Name | Video Duration | Watched Time |
@@ -61,8 +62,9 @@ const getAttendanceReport = async (req, res) => {
 
     const liveFilter = category ? { category } : {};
     const liveClasses = await liveClassModel.find(liveFilter).select(
-      "title category startedAt endedAt active"
+      "title category startedAt endedAt active durationSeconds youtubeVideoId"
     );
+    const manualLengths = await loadManualRecordingLengths(liveClasses);
     const liveClassById = new Map(liveClasses.map((lc) => [lc._id.toString(), lc]));
     const liveClassIds = liveClasses.map((lc) => lc._id);
 
@@ -74,7 +76,9 @@ const getAttendanceReport = async (req, res) => {
       .filter((row) => row.userId && liveClassById.has(row.liveClassId.toString()))
       .map((row) => {
         const liveClass = liveClassById.get(row.liveClassId.toString());
-        const durationSeconds = liveClass.getElapsedSeconds();
+        // Real class length — not the Go Live -> End Live time, which was
+        // 71h for a class left live for 3 days (see utils/liveSession.js).
+        const durationSeconds = liveSessionLength(liveClass, manualLengths).seconds;
         const stats = liveWatchStats(row, durationSeconds);
         const watchPercent = stats.percentWatched;
 
