@@ -2,6 +2,7 @@ const express = require("express");
 const { verifyToken, authorizeRoles } = require("../middlewares/authMiddleware");
 const requireCompletedProfile = require("../middlewares/requireCompletedProfile");
 const {
+  backfillRecordingsFromLiveClasses,
   startLiveClass,
   updateLiveClass,
   endLiveClass,
@@ -19,6 +20,11 @@ router.use(verifyToken);
 
 // Admin-only management + reporting.
 router.post("/", authorizeRoles("admin"), startLiveClass);
+router.post(
+  "/backfill-recordings",
+  authorizeRoles("admin"),
+  backfillRecordingsFromLiveClasses
+);
 router.patch("/:id/end", authorizeRoles("admin"), endLiveClass);
 router.patch("/:id", authorizeRoles("admin"), updateLiveClass);
 router.get("/", authorizeRoles("admin"), listLiveClasses);

@@ -216,6 +216,25 @@ const viewAttachmentFile = async (req, res) => {
   try {
     const { id } = req.params;
 
+    // Admin "View" from the Attachments admin page: any attachment (old or
+    // new, active or retired), no category/enrollment check, and never
+    // counted as a student view. ?download=1 lets the admin save their own
+    // file (used for PPT/DOC, which have no in-app preview).
+    if (req.user.role === "admin") {
+      const adminAttachment = await attachmentModel.findById(id);
+      if (!adminAttachment) {
+        return res.status(404).json({ success: false, message: "Attachment not found." });
+      }
+      const disposition = req.query.download === "1" ? "attachment" : "inline";
+      res.setHeader("Content-Type", adminAttachment.contentType);
+      res.setHeader(
+        "Content-Disposition",
+        `${disposition}; filename="${encodeURIComponent(adminAttachment.fileName)}"`
+      );
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      return await streamFileToResponse(adminAttachment.gridFsFileId, res);
+    }
+
     const attachment = await attachmentModel.findById(id);
     if (!attachment || !attachment.active) {
       return res.status(404).json({ success: false, message: "This material is not available." });

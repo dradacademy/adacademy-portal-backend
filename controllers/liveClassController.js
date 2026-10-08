@@ -475,7 +475,48 @@ const deleteLiveClass = async (req, res) => {
   }
 };
 
+// POST /api/live-classes/backfill-recordings (admin only) — one click to
+// bring every ALREADY-ENDED live class into Recorded Classes, the same way
+// End Live does for new ones. Safe to click any number of times: a class is
+// skipped if it (or the same video in the same category) is already in
+// Recorded Classes. Old recordings keep their original start date, so their
+// 7-day student visibility is counted from that date — edit "Visible for"
+// in Recorded Classes to show an older one to students again.
+const backfillRecordingsFromLiveClasses = async (req, res) => {
+  try {
+    const ended = await liveClassModel.find({ active: false }).sort({ startedAt: 1 });
+    let created = 0;
+    let skipped = 0;
+    let failed = 0;
+    const createdTitles = [];
+    for (const liveClass of ended) {
+      if (!liveClass.endedAt) liveClass.endedAt = liveClass.updatedAt || new Date();
+      const result = await addRecordingFromLiveClass(liveClass, req.user._id);
+      if (result.created) {
+        created++;
+        createdTitles.push(liveClass.title);
+      } else if (result.error) failed++;
+      else skipped++;
+    }
+    res.status(200).json({
+      success: true,
+      totalEnded: ended.length,
+      created,
+      skipped,
+      failed,
+      createdTitles,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Failed to add past live classes to Recorded Classes.",
+      error: error.message,
+    });
+  }
+};
+
 module.exports = {
+  backfillRecordingsFromLiveClasses,
   startLiveClass,
   updateLiveClass,
   endLiveClass,
