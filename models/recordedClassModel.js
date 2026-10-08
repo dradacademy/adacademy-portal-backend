@@ -79,6 +79,16 @@ const recordedClassSchema = new mongoose.Schema(
       default: 7,
       min: 0,
     },
+    // Set when this recording was created automatically by "End Live" on a
+    // live class (see addRecordingFromLiveClass in liveClassController.js).
+    // null for recordings the admin added manually via "Add Recording".
+    // Used to never add the same live class to Recorded Classes twice.
+    sourceLiveClassId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "LiveClass",
+      default: null,
+      index: true,
+    },
     // Soft-delete/retire flag — hides it from students without losing the
     // watch-history/analytics rows that reference it.
     active: {
@@ -90,6 +100,7 @@ const recordedClassSchema = new mongoose.Schema(
 );
 
 recordedClassSchema.index({ category: 1, active: 1 });
+recordedClassSchema.index({ category: 1, youtubeVideoId: 1 });
 
 // True when this recording should still show up / be playable for a
 // STUDENT right now — i.e. `active` and (no visibility window set, or the

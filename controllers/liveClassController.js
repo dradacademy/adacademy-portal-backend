@@ -5,6 +5,56 @@ const userModel = require("../models/userModel");
 const { isEnrollmentActive } = require("../models/enrollmentModel");
 const { extractYoutubeVideoId } = require("../utils/youtube");
 const { getAttendanceStatus } = require("../utils/attendanceHelper");
+const recordedClassModel = require("../models/recordedClassModel");
+const { createNotification } = require("./notificationController");
+
+// When a live class ends, YouTube keeps the stream as a normal video at the
+// SAME video ID (as long as the broadcast's archive/"save stream" setting is
+// on, which is YouTube's default). So the ended live class is added to
+// Recorded Classes automatically — same title, category, subject and video,
+// recorded date = when it started, duration = how long it ran, default
+// 7-day student visibility (editable afterwards in Recorded Classes like any
+// manual recording). Never adds the same class twice: skipped if a
+// recording already exists for this live class, or for the same video in
+// the same category (e.g. one the admin already added manually).
+// Best-effort: a failure here never stops the class from ending.
+const addRecordingFromLiveClass = async (liveClass, userId) => {
+  try {
+    const existing = await recordedClassModel.findOne({
+      $or: [
+        { sourceLiveClassId: liveClass._id },
+        { category: liveClass.category, youtubeVideoId: liveClass.youtubeVideoId },
+      ],
+    });
+    if (existing) return { recordedClass: existing, created: false };
+
+    const recordedClass = await recordedClassModel.create({
+      title: liveClass.title,
+      description: "",
+      category: liveClass.category,
+      subject: liveClass.subject || null,
+      youtubeVideoId: liveClass.youtubeVideoId,
+      recordedDate: liveClass.startedAt || new Date(),
+      durationSeconds: liveClass.endedAt ? liveClass.getElapsedSeconds() : null,
+      uploadedBy: userId || liveClass.startedBy || null,
+      sourceLiveClassId: liveClass._id,
+    });
+
+    createNotification({
+      category: liveClass.category,
+      type: "video",
+      title: `New recorded class: ${liveClass.title}`,
+      refId: recordedClass._id,
+      refModel: "RecordedClass",
+      createdBy: userId || null,
+    }).catch((err) => console.error("Failed to create video notification:", err.message));
+
+    return { recordedClass, created: true };
+  } catch (error) {
+    console.error("Auto-add to Recorded Classes failed:", error.name, error.message);
+    return { recordedClass: null, created: false, error: error.message };
+  }
+};
 
 // POST /api/live-classes (admin only) — "Go Live": the admin pastes the
 // YouTube Live watch link for the stream they've already started on
@@ -33,11 +83,15 @@ const startLiveClass = async (req, res) => {
     }
 
     // End any live class already in progress for this category — only one
-    // "live now" at a time per category.
-    await liveClassModel.updateMany(
-      { category, active: true },
-      { $set: { active: false, endedAt: new Date() } }
-    );
+    // "live now" at a time per category — and add each one to Recorded
+    // Classes, exactly as if "End Live" had been pressed on it.
+    const stillLive = await liveClassModel.find({ category, active: true });
+    for (const previous of stillLive) {
+      previous.active = false;
+      previous.endedAt = new Date();
+      await previous.save();
+      await addRecordingFromLiveClass(previous, req.user._id);
+    }
 
     const liveClass = await liveClassModel.create({
       title,
@@ -94,6 +148,15 @@ const updateLiveClass = async (req, res) => {
       return res.status(404).json({ success: false, message: "Live class not found." });
     }
 
+    // Keep the auto-added recording (if any) pointing at the corrected
+    // YouTube link too.
+    if (update.youtubeVideoId) {
+      await recordedClassModel.updateMany(
+        { sourceLiveClassId: liveClass._id },
+        { $set: { youtubeVideoId: update.youtubeVideoId } }
+      );
+    }
+
     res.status(200).json({ success: true, data: liveClass });
   } catch (error) {
     console.error("Failed to update live class:", error.name, error.message);
@@ -107,22 +170,37 @@ const updateLiveClass = async (req, res) => {
 
 // PATCH /api/live-classes/:id/end (admin only) — "End Live". Doesn't touch
 // YouTube itself (the admin ends the actual broadcast there, same as
-// always) — this just stops the app from showing it as ongoing.
+// always) — this stops the app from showing it as ongoing AND adds it to
+// Recorded Classes automatically (see addRecordingFromLiveClass above).
+// Send { addToRecorded: false } to end without adding it.
 const endLiveClass = async (req, res) => {
   try {
     const { id } = req.params;
+    const addToRecorded = req.body?.addToRecorded !== false;
 
-    const liveClass = await liveClassModel.findByIdAndUpdate(
-      id,
-      { active: false, endedAt: new Date() },
-      { new: true }
-    );
-
+    const liveClass = await liveClassModel.findById(id);
     if (!liveClass) {
       return res.status(404).json({ success: false, message: "Live class not found." });
     }
 
-    res.status(200).json({ success: true, data: liveClass });
+    // Ending an already-ended class keeps its original end time.
+    if (liveClass.active || !liveClass.endedAt) {
+      liveClass.active = false;
+      liveClass.endedAt = new Date();
+      await liveClass.save();
+    }
+
+    const recording = addToRecorded
+      ? await addRecordingFromLiveClass(liveClass, req.user._id)
+      : { recordedClass: null, created: false };
+
+    res.status(200).json({
+      success: true,
+      data: liveClass,
+      recordedClass: recording.recordedClass,
+      recordingCreated: recording.created,
+      recordingError: recording.error || null,
+    });
   } catch (error) {
     res.status(500).json({
       success: false,
