@@ -25,7 +25,7 @@ const listStudentProgress = async (req, res) => {
       sortDir,
     } = req.query;
 
-    const match = { role: "student" };
+    const match = { role: "student", accountType: { $ne: "free_trial" } };
     if (category) match.category = category;
     if (batch) match.batch = batch;
     if (activeStatus === "active") match.isDisabled = false;

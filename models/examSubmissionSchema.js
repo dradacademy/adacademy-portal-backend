@@ -51,6 +51,12 @@ const ExamSubmissionSchema = new mongoose.Schema(
           enum: ["Correct", "Incorrect", "Partially Correct", "Skipped"],
           default: "Skipped",
         },
+        // Seconds the student spent on this question during the exam
+        // (2026-10-08). Missing on submissions made before that date.
+        timeSpentSeconds: {
+          type: Number,
+          default: undefined,
+        },
       },
     ],
     timetaken: {

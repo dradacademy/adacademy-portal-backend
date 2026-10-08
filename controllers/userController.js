@@ -215,7 +215,7 @@ const loginUser = async (req, res) => {
       });
     }
 
-    if (user.role === "student") {
+    if (user.role === "student" && user.accountType !== "free_trial") {
       if (user.registerNumber !== registerNumber) {
         return res.status(400).json({ error: "Invalid Register Number" });
       }
@@ -627,7 +627,11 @@ const bulkCreateUsers = async (req, res) => {
 
 const getAllUsersData = async (req, res) => {
   try {
-    const usersData = await userModel.find().select("-password");
+    // Free Test registrants have their own admin page (Free Test
+    // Registrations), so they're kept out of the normal Users list.
+    const usersData = await userModel
+      .find({ accountType: { $ne: "free_trial" } })
+      .select("-password");
     res.status(200).json(usersData);
   } catch (error) {
     res.status(500).json({ error: error.message });

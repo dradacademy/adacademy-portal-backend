@@ -19,6 +19,10 @@ const requireCompletedProfile = async (req, res, next) => {
     if (!req.user || req.user.role !== "student") {
       return next();
     }
+    // Free Test registrants don't fill the full student profile.
+    if (req.user.accountType === "free_trial") {
+      return next();
+    }
 
     const profile = await studentProfileModel
       .findOne({ userId: req.user._id })

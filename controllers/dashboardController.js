@@ -597,7 +597,7 @@ const getAllStudentsOverview = async (req, res) => {
     // Admin's category-organized workflow: optionally scope this student
     // list to one exam category (GATE / TNPSC AE / TNPSC JDO / SSC JE-RRB
     // JE) instead of seeing every category's students mixed together.
-    const studentMatch = { role: "student" };
+    const studentMatch = { role: "student", accountType: { $ne: "free_trial" } };
     if (req.query.category) {
       studentMatch.category = req.query.category;
     }
@@ -782,10 +782,10 @@ const getStudentDetailedAnalysis = async (req, res) => {
     // aggregation pipeline: average obtainedMark per userId in one pass,
     // left-joined against every student so a student with zero submissions
     // still ranks (avgScore 0) instead of being silently dropped.
-    const totalStudentsCount = await User.countDocuments({ role: "student" });
+    const totalStudentsCount = await User.countDocuments({ role: "student", accountType: { $ne: "free_trial" } });
 
     const rankAgg = await User.aggregate([
-      { $match: { role: "student" } },
+      { $match: { role: "student", accountType: { $ne: "free_trial" } } },
       { $project: { _id: 1 } },
       {
         $lookup: {

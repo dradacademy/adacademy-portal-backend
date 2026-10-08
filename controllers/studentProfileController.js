@@ -212,7 +212,7 @@ const listProfilesAdmin = async (req, res) => {
   try {
     const { category, search, status } = req.query;
 
-    const userMatch = { role: "student" };
+    const userMatch = { role: "student", accountType: { $ne: "free_trial" } };
     if (category) userMatch.category = category;
     if (search) {
       const regex = new RegExp(search.trim(), "i");

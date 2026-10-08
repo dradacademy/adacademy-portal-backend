@@ -95,7 +95,12 @@ router.post(
             status: "completed",
           }),
         ]);
-        const maxAllowedAttempts = existingCounter?.maxAllowedAttempts ?? 1;
+        // Free Test registrants get exactly one attempt at the free test,
+        // so its rank stays meaningful.
+        const maxAllowedAttempts =
+          req.user.accountType === "free_trial"
+            ? 1
+            : existingCounter?.maxAllowedAttempts ?? 1;
 
         if (completedCount >= maxAllowedAttempts) {
           return res.status(403).json({

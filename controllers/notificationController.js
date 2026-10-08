@@ -16,8 +16,10 @@ const createNotification = async ({
   refId = null,
   refModel = null,
   createdBy = null,
+  userId = null,
 }) => {
   return notificationModel.create({
+    userId,
     category,
     type,
     title,
@@ -62,8 +64,16 @@ const createAnnouncement = async (req, res) => {
 // global ones), each flagged `isNew` against their rolling watermark.
 const listNotifications = async (req, res) => {
   try {
+    // Broadcasts for everyone / the student's category, plus personal
+    // notifications addressed to this student only.
     const filter = {
-      $or: [{ category: null }, { category: req.user.category || "__none__" }],
+      $or: [
+        { userId: req.user._id },
+        {
+          userId: null,
+          $or: [{ category: null }, { category: req.user.category || "__none__" }],
+        },
+      ],
     };
 
     const [notifications, user] = await Promise.all([

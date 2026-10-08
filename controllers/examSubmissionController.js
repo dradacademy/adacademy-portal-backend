@@ -620,10 +620,20 @@ const submitExam = async (req, res) => {
       );
 
       // 6. Evaluate answers (O(n) with Map lookup)
+      // Per-question time from the exam screen — trusted only within the
+      // exam's own limits (never negative, never above the whole duration
+      // plus grace).
+      const maxPerQuestion = allowedDuration + GRACE_PERIOD_SECONDS;
+      const cleanTime = (v) => {
+        const n = Number(v);
+        return Number.isFinite(n) && n > 0 ? Math.min(Math.round(n), maxPerQuestion) : 0;
+      };
+
       const enhancedExamData = submissionData.examData.map((studQuestion) => {
         const question = questionMap.get(studQuestion.questionId); // O(1) lookup!
-        if (!question) return studQuestion;
-        return evaluateQuestion(question, studQuestion);
+        const withTime = { ...studQuestion, timeSpentSeconds: cleanTime(studQuestion.timeSpentSeconds) };
+        if (!question) return withTime;
+        return evaluateQuestion(question, withTime);
       });
 
       // 7. Calculate marks (O(n) with Map lookup), resolving each

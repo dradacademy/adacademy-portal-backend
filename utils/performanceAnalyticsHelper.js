@@ -701,7 +701,7 @@ const computeCategoryRollup = async (category, { fromDate, toDate } = {}) => {
   // submissions already fetched above, than students who haven't? This
   // never claims a video/attachment CAUSED the difference — engagement and
   // performance could both just track how generally active a student is.
-  const categoryStudents = await User.find({ role: "student", category })
+  const categoryStudents = await User.find({ role: "student", category, accountType: { $ne: "free_trial" } })
     .select("_id")
     .lean();
   const categoryStudentIds = categoryStudents.map((s) => s._id);

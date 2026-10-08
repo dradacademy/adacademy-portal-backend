@@ -32,7 +32,7 @@ const enrollmentLeadSchema = new mongoose.Schema(
     // the admin has one place to see every inbound lead.
     source: {
       type: String,
-      enum: ["enroll_form", "callback_request"],
+      enum: ["enroll_form", "callback_request", "free_test"],
       default: "enroll_form",
     },
     // Set once an admin has followed up on this lead — not exposed on the

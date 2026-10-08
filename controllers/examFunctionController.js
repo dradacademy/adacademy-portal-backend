@@ -57,13 +57,14 @@ const getEligibleExamForUser = async (req, res) => {
     // first not-yet-passed exam per subtopic was ever surfaced here).
     for (const subject of allSubjects) {
       for (const subTopic of subject.subtopics) {
-        const exams = await examModel
-          .find({
-            subject: subject._id,
-            subTopic: subTopic._id,
-            status: "active",
-          })
-          .sort({ order: 1 });
+        const examFilter = {
+          subject: subject._id,
+          subTopic: subTopic._id,
+          status: "active",
+        };
+        // Free Test registrants only see the free test(s).
+        if (req.user.accountType === "free_trial") examFilter.isFreeTest = true;
+        const exams = await examModel.find(examFilter).sort({ order: 1 });
 
         for (const exam of exams) {
           flattenedExams.push({

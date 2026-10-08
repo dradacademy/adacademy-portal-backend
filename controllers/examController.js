@@ -193,6 +193,7 @@ const createExam = async (req, res) => {
       questionSets,
       scheduledDate,
       allNumericAnswerKeypad,
+      isFreeTest,
     } = req.body;
 
     if (
@@ -330,6 +331,7 @@ const createExam = async (req, res) => {
             publishedAt: status === "active" ? new Date() : null,
             passPercentage: passPercentage || 90,
             allNumericAnswerKeypad: !!allNumericAnswerKeypad,
+            isFreeTest: !!isFreeTest,
             examCode,
             poolQuestions: createdQuestions.map((q) => q._id), // Full question pool
             questions: activeQuestions, // Active questions only
@@ -469,6 +471,7 @@ const getAllExams = async (req, res) => {
         examCode: exam.examCode,
         shuffleQuestion: exam.shuffleQuestion,
         allNumericAnswerKeypad: exam.allNumericAnswerKeypad,
+        isFreeTest: !!exam.isFreeTest,
         scheduledDate: exam.scheduledDate,
         publishedAt: exam.publishedAt,
         createdAt: exam.createdAt,
@@ -494,6 +497,7 @@ const updateExam = async (req, res) => {
       examCode,
       scheduledDate,
       allNumericAnswerKeypad,
+      isFreeTest,
     } = req.body;
 
     if (
@@ -717,6 +721,8 @@ const updateExam = async (req, res) => {
               allNumericAnswerKeypad !== undefined
                 ? !!allNumericAnswerKeypad
                 : exam.allNumericAnswerKeypad,
+            isFreeTest:
+              isFreeTest !== undefined ? !!isFreeTest : !!exam.isFreeTest,
             ...(examCode ? { examCode } : {}),
             poolQuestions: updatedQuestionIds,
             questions: nextActiveQuestions,
@@ -885,6 +891,7 @@ const getExamById = async (req, res) => {
         passPercentage: exam.passPercentage,
         shuffleQuestion: exam.shuffleQuestion,
         allNumericAnswerKeypad: exam.allNumericAnswerKeypad,
+        isFreeTest: !!exam.isFreeTest,
       };
     };
 

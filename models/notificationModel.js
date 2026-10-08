@@ -22,7 +22,7 @@ const notificationSchema = new mongoose.Schema(
     },
     type: {
       type: String,
-      enum: ["video", "test", "attachment", "announcement"],
+      enum: ["video", "test", "attachment", "announcement", "doubt"],
       required: true,
     },
     title: {
@@ -44,8 +44,16 @@ const notificationSchema = new mongoose.Schema(
     },
     refModel: {
       type: String,
-      enum: ["RecordedClass", "Exam", "Attachment"],
+      enum: ["RecordedClass", "Exam", "Attachment", "ExamSubmission"],
       default: null,
+    },
+    // Personal notification for one student (e.g. "your doubt was
+    // answered"). null = a category/everyone broadcast as before.
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+      index: true,
     },
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,

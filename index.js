@@ -101,6 +101,12 @@ app.set("trust proxy", 1);
   app.use("/api/answer-sheets", require("./routes/answerSheetRoute"));
   app.use("/api/student-progress", require("./routes/studentProgressRoute"));
   app.use("/api/student-profiles", require("./routes/studentProfileRoute"));
+  // 2026-10-08: question-level analysis, My Mistakes notebook, doubts,
+  // free registration test.
+  app.use("/api/question-insights", require("./routes/questionInsightsRoute"));
+  app.use("/api/notebook", require("./routes/notebookRoute"));
+  app.use("/api/doubts", require("./routes/doubtRoute"));
+  app.use("/api/free-test", require("./routes/freeTestRoute"));
   app.use(
     "/api/performance-analytics",
     require("./routes/performanceAnalyticsRoute"),

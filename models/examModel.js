@@ -61,6 +61,14 @@ const examSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    // Free registration test (2026-10-08): anyone can register on the
+    // public /free-test page and take this one exam for its category. Free
+    // registrants only ever see exams with this flag; enrolled students
+    // see it like any other test.
+    isFreeTest: {
+      type: Boolean,
+      default: false,
+    },
     questionSelection: {
       MCQ: {
         startIndex: { type: Number, default: 0 },

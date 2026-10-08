@@ -162,7 +162,7 @@ const getStudentTestIndex = async (req, res) => {
       });
     }
 
-    const student = await User.findById(userId).select("category role");
+    const student = await User.findById(userId).select("category role accountType");
     if (!student) {
       return res
         .status(404)
@@ -178,8 +178,11 @@ const getStudentTestIndex = async (req, res) => {
     );
     const subjectIds = subjects.map((s) => s._id);
 
+    const examQuery = { subject: { $in: subjectIds }, status: "active" };
+    // Free Test registrants only see the free test(s).
+    if (student.accountType === "free_trial") examQuery.isFreeTest = true;
     const exams = await examModel
-      .find({ subject: { $in: subjectIds }, status: "active" })
+      .find(examQuery)
       .populate("questions")
       .sort({ subject: 1, subTopic: 1, order: 1 });
 
@@ -267,6 +270,7 @@ const getAdminTestTracking = async (req, res) => {
     const [students, submissions, markConfig] = await Promise.all([
       User.find({
         role: "student",
+        accountType: { $ne: "free_trial" },
         category: { $in: categoriesInScope },
       }).select("username email category isDisabled"),
       examSubmissionSchema

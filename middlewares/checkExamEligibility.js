@@ -46,6 +46,13 @@ const checkExamEligibility = async (req, res, next) => {
       });
     }
 
+    if (req.user.accountType === "free_trial" && !exam.isFreeTest) {
+      return res.status(403).json({
+        success: false,
+        message: "Your free account includes the free test only. Contact the academy to join the full test series.",
+      });
+    }
+
     const matchingSubtopic = exam.subject.subtopics.find(
       (subtopic) => subtopic._id.toString() === exam.subTopic.toString(),
     );

@@ -68,6 +68,33 @@ const userSchema = new mongoose.Schema(
       default: "",
       trim: true,
     },
+    // "student" = normal enrolled student; "free_trial" = registered on the
+    // public Free Test page (2026-10-08). Free registrants only see exams
+    // marked isFreeTest, skip the student-profile gate, and are left out of
+    // student lists/analytics.
+    accountType: {
+      type: String,
+      enum: ["student", "free_trial"],
+      default: "student",
+    },
+    // Details collected on the Free Test registration form.
+    freeTestDetails: {
+      phone: { type: String, default: "" },
+      city: { type: String, default: "" },
+      qualification: { type: String, default: "" },
+      college: { type: String, default: "" },
+      passingYear: { type: String, default: "" },
+      currentStatus: { type: String, default: "" },
+      heardFrom: { type: String, default: "" },
+      registeredAt: { type: Date, default: null },
+    },
+    // Ask-a-doubt access: "auto" = allowed when the student is regular
+    // (see utils/doubtEligibility.js); "allow"/"block" = admin override.
+    doubtAccess: {
+      type: String,
+      enum: ["auto", "allow", "block"],
+      default: "auto",
+    },
     // A rolling watermark, not a per-notification read receipt: any
     // Notification created after this timestamp (and matching the
     // student's category, or global) counts as "new" for them — advanced
