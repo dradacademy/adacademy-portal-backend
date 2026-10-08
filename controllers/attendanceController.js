@@ -3,6 +3,7 @@ const recordedClassModel = require("../models/recordedClassModel");
 const liveAttendanceModel = require("../models/liveAttendanceModel");
 const liveClassModel = require("../models/liveClassModel");
 const { getAttendanceStatus } = require("../utils/attendanceHelper");
+const { recordedWatchStats, liveWatchStats } = require("../utils/watchTime");
 
 // GET /api/attendance/report (admin only) — the combined report the admin
 // asked for: "Student Name | Video Name | Video Duration | Watched Time |
@@ -35,9 +36,8 @@ const getAttendanceReport = async (req, res) => {
       .map((row) => {
         const video = recordedClassById.get(row.videoId.toString());
         const durationSeconds = video.durationSeconds || 0;
-        const watchPercent = durationSeconds
-          ? Math.min(100, (row.totalWatchSeconds / durationSeconds) * 100)
-          : 0;
+        const stats = recordedWatchStats(row, durationSeconds);
+        const watchPercent = stats.percentWatched;
 
         return {
           sessionType: "Recorded",
@@ -47,8 +47,11 @@ const getAttendanceReport = async (req, res) => {
           contentId: video._id,
           contentTitle: video.title,
           durationSeconds,
-          watchedSeconds: row.totalWatchSeconds,
-          watchPercent: Number(watchPercent.toFixed(1)),
+          // Unique part of the video watched (never more than its length).
+          watchedSeconds: stats.watchedSeconds,
+          timeSpentSeconds: stats.timeSpentSeconds,
+          estimated: stats.estimated,
+          watchPercent,
           attendanceStatus: durationSeconds
             ? getAttendanceStatus(watchPercent)
             : "—", // no duration entered yet — can't compute a percentage
@@ -72,10 +75,8 @@ const getAttendanceReport = async (req, res) => {
       .map((row) => {
         const liveClass = liveClassById.get(row.liveClassId.toString());
         const durationSeconds = liveClass.getElapsedSeconds();
-        const watchPercent = Math.min(
-          100,
-          (row.totalWatchSeconds / durationSeconds) * 100
-        );
+        const stats = liveWatchStats(row, durationSeconds);
+        const watchPercent = stats.percentWatched;
 
         return {
           sessionType: "Live",
@@ -85,8 +86,10 @@ const getAttendanceReport = async (req, res) => {
           contentId: liveClass._id,
           contentTitle: liveClass.title,
           durationSeconds,
-          watchedSeconds: row.totalWatchSeconds,
-          watchPercent: Number(watchPercent.toFixed(1)),
+          watchedSeconds: stats.watchedSeconds,
+          timeSpentSeconds: stats.timeSpentSeconds,
+          estimated: stats.estimated,
+          watchPercent,
           attendanceStatus: getAttendanceStatus(watchPercent),
           lastWatchedAt: row.lastWatchedAt,
         };

@@ -36,6 +36,21 @@ const videoProgressSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    // Accurate tracking (2026-10-08) — see utils/watchTime.js. No schema
+    // defaults on purpose: a missing trackingVersion is how a row recorded
+    // by the old (inflating) player is recognised.
+    trackingVersion: {
+      type: Number,
+    },
+    // The old inflated total, frozen at the first accurate ping.
+    legacyWatchSeconds: {
+      type: Number,
+    },
+    // Parts of the video actually played, merged: [[startSec, endSec], ...]
+    watchedRanges: {
+      type: [[Number]],
+      default: undefined,
+    },
     sessionCount: {
       type: Number,
       default: 0,
@@ -50,10 +65,8 @@ const videoProgressSchema = new mongoose.Schema(
 
 videoProgressSchema.index({ userId: 1, videoId: 1 }, { unique: true });
 
-const derivePercentWatched = (progress, durationSeconds) => {
-  if (!progress || !durationSeconds || durationSeconds <= 0) return 0;
-  return Math.min(100, (progress.totalWatchSeconds / durationSeconds) * 100);
-};
+const derivePercentWatched = (progress, durationSeconds) =>
+  require("../utils/watchTime").recordedWatchStats(progress, durationSeconds).percentWatched;
 
 const VideoProgressModel = mongoose.model("VideoProgress", videoProgressSchema);
 

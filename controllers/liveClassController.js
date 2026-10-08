@@ -1,4 +1,5 @@
 const liveClassModel = require("../models/liveClassModel");
+const { buildPingUpdate, liveWatchStats } = require("../utils/watchTime");
 const liveAttendanceModel = require("../models/liveAttendanceModel");
 const enrollmentModel = require("../models/enrollmentModel");
 const userModel = require("../models/userModel");
@@ -351,24 +352,19 @@ const joinLiveClass = async (req, res) => {
 const recordLiveProgress = async (req, res) => {
   try {
     const { id } = req.params;
-    const { deltaSecondsWatched, newSession } = req.body;
 
     const liveClass = await liveClassModel.findById(id).select("_id");
     if (!liveClass) {
       return res.status(404).json({ success: false, message: "Live class not found." });
     }
 
-    const update = {
-      $set: { lastWatchedAt: new Date() },
-      $inc: {},
-    };
-    if (typeof deltaSecondsWatched === "number" && deltaSecondsWatched > 0) {
-      update.$inc.totalWatchSeconds = deltaSecondsWatched;
-    }
-    if (newSession) {
-      update.$inc.sessionCount = 1;
-    }
-    if (Object.keys(update.$inc).length === 0) delete update.$inc;
+    // Real playing time only (see utils/watchTime.js) — joining a stream
+    // mid-way no longer counts everything before the join.
+    const existing = await liveAttendanceModel
+      .findOne({ userId: req.user._id, liveClassId: id })
+      .select("totalWatchSeconds trackingVersion legacyWatchSeconds")
+      .lean();
+    const update = buildPingUpdate(existing, req.body, 0, { withRanges: false });
 
     const attendance = await liveAttendanceModel.findOneAndUpdate(
       { userId: req.user._id, liveClassId: id },
@@ -415,10 +411,8 @@ const getLiveAttendanceReport = async (req, res) => {
       .map((row) => {
         const liveClass = liveClassById.get(row.liveClassId.toString());
         const durationSeconds = liveClass.getElapsedSeconds();
-        const watchPercent = Math.min(
-          100,
-          (row.totalWatchSeconds / durationSeconds) * 100
-        );
+        const stats = liveWatchStats(row, durationSeconds);
+        const watchPercent = stats.percentWatched;
 
         return {
           studentId: row.userId._id,
@@ -429,8 +423,9 @@ const getLiveAttendanceReport = async (req, res) => {
           startedAt: liveClass.startedAt,
           liveClassStillActive: liveClass.active,
           durationSeconds,
-          watchedSeconds: row.totalWatchSeconds,
-          watchPercent: Number(watchPercent.toFixed(1)),
+          watchedSeconds: stats.watchedSeconds,
+          estimated: stats.estimated,
+          watchPercent,
           attendanceStatus: getAttendanceStatus(watchPercent),
           lastWatchedAt: row.lastWatchedAt,
         };

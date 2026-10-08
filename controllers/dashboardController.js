@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { recordedWatchStats } = require("../utils/watchTime");
 const ExamSubmission = require("../models/examSubmissionSchema");
 const User = require("../models/userModel");
 const Exam = require("../models/examModel");
@@ -1238,15 +1239,14 @@ const getStudentDetailedAnalysis = async (req, res) => {
       .filter((row) => row.videoId)
       .map((row) => {
         const durationSeconds = row.videoId.durationSeconds || 0;
-        const percentWatched = durationSeconds
-          ? Math.min(100, (row.totalWatchSeconds / durationSeconds) * 100)
-          : 0;
+        const stats = recordedWatchStats(row, durationSeconds);
 
         return {
           videoId: row.videoId._id,
           title: row.videoId.title,
-          totalWatchSeconds: row.totalWatchSeconds,
-          percentWatched: Number(percentWatched.toFixed(1)),
+          totalWatchSeconds: stats.timeSpentSeconds,
+          watchedSeconds: stats.watchedSeconds,
+          percentWatched: stats.percentWatched,
           sessionCount: row.sessionCount,
           lastWatchedAt: row.lastWatchedAt,
           lastPositionSeconds: row.lastPositionSeconds,

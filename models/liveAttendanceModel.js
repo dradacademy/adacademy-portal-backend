@@ -25,6 +25,16 @@ const liveAttendanceSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    // Accurate tracking (2026-10-08) — see utils/watchTime.js. No schema
+    // defaults on purpose: a missing trackingVersion is how a row recorded
+    // by the old (inflating) player is recognised.
+    trackingVersion: {
+      type: Number,
+    },
+    // The old inflated total, frozen at the first accurate ping.
+    legacyWatchSeconds: {
+      type: Number,
+    },
     sessionCount: {
       type: Number,
       default: 0,

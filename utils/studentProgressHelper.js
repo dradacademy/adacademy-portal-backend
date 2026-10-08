@@ -1,4 +1,5 @@
 const Subject = require("../models/subjectModel");
+const { recordedWatchStats } = require("./watchTime");
 const Exam = require("../models/examModel");
 const ExamSubmission = require("../models/examSubmissionSchema");
 const RecordedClass = require("../models/recordedClassModel");
@@ -196,10 +197,7 @@ const computeStudentProgress = async (students) => {
     const videoList = categoryVideos.map((video) => {
       const row = studentVideoRows.get(video._id.toString());
       const durationSeconds = video.durationSeconds || 0;
-      const totalWatchSeconds = row?.totalWatchSeconds || 0;
-      const percentWatched = durationSeconds
-        ? Math.min(100, (totalWatchSeconds / durationSeconds) * 100)
-        : 0;
+      const { percentWatched } = recordedWatchStats(row, durationSeconds);
       return {
         videoId: video._id,
         title: video.title,

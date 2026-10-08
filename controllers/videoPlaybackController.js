@@ -1,4 +1,5 @@
 const recordedClassModel = require("../models/recordedClassModel");
+const { buildPingUpdate, recordedWatchStats } = require("../utils/watchTime");
 const videoProgressModel = require("../models/videoProgressModel");
 const enrollmentModel = require("../models/enrollmentModel");
 const { isEnrollmentActive } = require("../models/enrollmentModel");
@@ -50,10 +51,7 @@ const listAvailableVideos = async (req, res) => {
     const data = videos.map((video) => {
       const progress = progressByVideoId.get(video._id.toString());
       const durationSeconds = video.durationSeconds || 0;
-      const percentWatched =
-        progress && durationSeconds
-          ? Math.min(100, (progress.totalWatchSeconds / durationSeconds) * 100)
-          : 0;
+      const { percentWatched } = recordedWatchStats(progress, durationSeconds);
 
       return {
         _id: video._id,
@@ -173,28 +171,22 @@ const getPlaybackToken = async (req, res) => {
 const recordProgress = async (req, res) => {
   try {
     const { id } = req.params;
-    const { positionSeconds, deltaSecondsWatched, newSession } = req.body;
 
-    const video = await recordedClassModel.findById(id).select("_id");
+    const video = await recordedClassModel.findById(id).select("_id durationSeconds");
     if (!video) {
       return res.status(404).json({ success: false, message: "Video not found." });
     }
 
-    const update = {
-      $set: { lastWatchedAt: new Date() },
-      $inc: {},
-    };
-
-    if (typeof deltaSecondsWatched === "number" && deltaSecondsWatched > 0) {
-      update.$inc.totalWatchSeconds = deltaSecondsWatched;
-    }
-    if (newSession) {
-      update.$inc.sessionCount = 1;
-    }
-    if (typeof positionSeconds === "number" && positionSeconds >= 0) {
-      update.$set.lastPositionSeconds = positionSeconds;
-    }
-    if (Object.keys(update.$inc).length === 0) delete update.$inc;
+    // Accurate watch time (see utils/watchTime.js): real playing time +
+    // the parts of the video actually played. Old cached players are still
+    // accepted but their seek/resume jumps are ignored.
+    const existing = await videoProgressModel
+      .findOne({ userId: req.user._id, videoId: id })
+      .select("totalWatchSeconds trackingVersion legacyWatchSeconds watchedRanges")
+      .lean();
+    const update = buildPingUpdate(existing, req.body, video.durationSeconds || 0, {
+      withRanges: true,
+    });
 
     const progress = await videoProgressModel.findOneAndUpdate(
       { userId: req.user._id, videoId: id },

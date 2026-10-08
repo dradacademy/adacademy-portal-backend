@@ -1,4 +1,5 @@
 const recordedClassModel = require("../models/recordedClassModel");
+const { recordedWatchStats } = require("../utils/watchTime");
 const videoProgressModel = require("../models/videoProgressModel");
 const userModel = require("../models/userModel");
 const { extractYoutubeVideoId } = require("../utils/youtube");
@@ -222,9 +223,8 @@ const getVideoAnalytics = async (req, res) => {
       .filter((row) => row.userId && row.videoId)
       .map((row) => {
         const durationSeconds = row.videoId.durationSeconds || 0;
-        const percentWatched = durationSeconds
-          ? Math.min(100, (row.totalWatchSeconds / durationSeconds) * 100)
-          : 0;
+        const stats = recordedWatchStats(row, durationSeconds);
+        const percentWatched = stats.percentWatched;
 
         return {
           studentId: row.userId._id,
@@ -232,8 +232,12 @@ const getVideoAnalytics = async (req, res) => {
           studentEmail: row.userId.email,
           videoId: row.videoId._id,
           videoTitle: row.videoId.title,
-          totalWatchSeconds: row.totalWatchSeconds,
-          percentWatched: Number(percentWatched.toFixed(1)),
+          // Real time spent playing (rewatching counts); pre-fix rows are
+          // capped at the video length — see utils/watchTime.js.
+          totalWatchSeconds: stats.timeSpentSeconds,
+          watchedSeconds: stats.watchedSeconds,
+          estimated: stats.estimated,
+          percentWatched,
           sessionCount: row.sessionCount,
           lastWatchedAt: row.lastWatchedAt,
           lastPositionSeconds: row.lastPositionSeconds,
@@ -271,16 +275,19 @@ const getStudentVideoAnalytics = async (req, res) => {
       .filter((row) => row.videoId)
       .map((row) => {
         const durationSeconds = row.videoId.durationSeconds || 0;
-        const percentWatched = durationSeconds
-          ? Math.min(100, (row.totalWatchSeconds / durationSeconds) * 100)
-          : 0;
+        const stats = recordedWatchStats(row, durationSeconds);
+        const percentWatched = stats.percentWatched;
 
         return {
           videoId: row.videoId._id,
           title: row.videoId.title,
           recordedDate: row.videoId.recordedDate,
-          totalWatchSeconds: row.totalWatchSeconds,
-          percentWatched: Number(percentWatched.toFixed(1)),
+          // Real time spent playing (rewatching counts); pre-fix rows are
+          // capped at the video length — see utils/watchTime.js.
+          totalWatchSeconds: stats.timeSpentSeconds,
+          watchedSeconds: stats.watchedSeconds,
+          estimated: stats.estimated,
+          percentWatched,
           sessionCount: row.sessionCount,
           lastWatchedAt: row.lastWatchedAt,
           lastPositionSeconds: row.lastPositionSeconds,
