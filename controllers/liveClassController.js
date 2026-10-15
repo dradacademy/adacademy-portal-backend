@@ -14,14 +14,27 @@ const { extractYoutubeVideoId } = require("../utils/youtube");
 const { getAttendanceStatus } = require("../utils/attendanceHelper");
 const recordedClassModel = require("../models/recordedClassModel");
 const { createNotification } = require("./notificationController");
+const {
+  parseAvailabilityInput,
+  withAvailability,
+} = require("../utils/classAvailability");
+
+// The replay availability chosen for a live class, in RecordedClass field
+// form. Old live classes created before this setting existed get the
+// schema default (7 days from the class date).
+const replayAvailabilityFields = (liveClass) => ({
+  visibilityWindowDays:
+    liveClass.visibilityWindowDays === undefined ? 7 : liveClass.visibilityWindowDays,
+  availableUntil: liveClass.availableUntil || null,
+});
 
 // When a live class ends, YouTube keeps the stream as a normal video at the
 // SAME video ID (as long as the broadcast's archive/"save stream" setting is
 // on, which is YouTube's default). So the ended live class is added to
 // Recorded Classes automatically — same title, category, subject and video,
-// recorded date = when it started, duration = how long it ran, default
-// 7-day student visibility (editable afterwards in Recorded Classes like any
-// manual recording). Never adds the same class twice: skipped if a
+// recorded date = when it started, duration = how long it ran, and the
+// replay availability chosen on Go Live (default 7 days from the class
+// date; editable afterwards in Recorded Classes like any manual recording). Never adds the same class twice: skipped if a
 // recording already exists for this live class, or for the same video in
 // the same category (e.g. one the admin already added manually).
 // Best-effort: a failure here never stops the class from ending.
@@ -47,6 +60,9 @@ const addRecordingFromLiveClass = async (liveClass, userId) => {
         : null,
       uploadedBy: userId || liveClass.startedBy || null,
       sourceLiveClassId: liveClass._id,
+      // The replay stays watchable for exactly the period chosen on Go Live
+      // (or set later via Edit Live Class), counted from the class date.
+      ...replayAvailabilityFields(liveClass),
     });
 
     createNotification({
@@ -112,6 +128,12 @@ const startLiveClass = async (req, res) => {
       });
     }
 
+    // How long the replay stays available after the class ends.
+    const availability = parseAvailabilityInput(req.body);
+    if (availability && !availability.ok) {
+      return res.status(400).json({ success: false, message: availability.message });
+    }
+
     // End any live class already in progress for this category — only one
     // "live now" at a time per category — and add each one to Recorded
     // Classes, exactly as if "End Live" had been pressed on it.
@@ -131,6 +153,7 @@ const startLiveClass = async (req, res) => {
       active: true,
       startedBy: req.user._id,
       startedAt: new Date(),
+      ...(availability ? availability.fields : {}),
     });
 
     res.status(201).json({ success: true, data: liveClass });
@@ -156,6 +179,11 @@ const updateLiveClass = async (req, res) => {
     const { title, category, subject, youtubeUrl, durationMinutes } = req.body;
 
     const update = {};
+    const availability = parseAvailabilityInput(req.body);
+    if (availability && !availability.ok) {
+      return res.status(400).json({ success: false, message: availability.message });
+    }
+    if (availability) Object.assign(update, availability.fields);
     // Real class length in minutes (blank/0 clears it -> automatic length).
     if (durationMinutes !== undefined) {
       const minutes = Number(durationMinutes);
@@ -188,6 +216,8 @@ const updateLiveClass = async (req, res) => {
     // and the corrected class length.
     const recordingUpdate = {};
     if (update.youtubeVideoId) recordingUpdate.youtubeVideoId = update.youtubeVideoId;
+    // A changed replay period applies to the replay that already exists too.
+    if (availability) Object.assign(recordingUpdate, replayAvailabilityFields(liveClass));
     if (durationMinutes !== undefined && !liveClass.active) {
       recordingUpdate.durationSeconds = liveSessionLength(
         liveClass,
@@ -290,7 +320,7 @@ const listLiveClasses = async (req, res) => {
     const data = liveClasses.map((lc) => {
       const length = liveSessionLength(lc, manualLengths);
       return {
-        ...lc.toObject(),
+        ...withAvailability(lc, lc.startedAt),
         lengthSeconds: length.seconds,
         lengthSource: length.source,
       };
@@ -548,8 +578,8 @@ const deleteLiveClass = async (req, res) => {
 // End Live does for new ones. Safe to click any number of times: a class is
 // skipped if it (or the same video in the same category) is already in
 // Recorded Classes. Old recordings keep their original start date, so their
-// 7-day student visibility is counted from that date — edit "Visible for"
-// in Recorded Classes to show an older one to students again.
+// availability is counted from that date — use Edit or Extend in Recorded
+// Classes to show an older one to students again.
 const backfillRecordingsFromLiveClasses = async (req, res) => {
   try {
     const ended = await liveClassModel.find({ active: false }).sort({ startedAt: 1 });

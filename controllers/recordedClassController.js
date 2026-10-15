@@ -4,6 +4,14 @@ const videoProgressModel = require("../models/videoProgressModel");
 const userModel = require("../models/userModel");
 const { extractYoutubeVideoId } = require("../utils/youtube");
 const { createNotification } = require("./notificationController");
+const {
+  DAY_MS,
+  MAX_DAYS,
+  endOfIstDay,
+  getAvailableUntil,
+  parseAvailabilityInput,
+  withAvailability,
+} = require("../utils/classAvailability");
 
 // POST /api/recorded-classes (admin only) — the admin uploads the class
 // recording to their own YouTube account (as Unlisted, so it isn't publicly
@@ -20,7 +28,6 @@ const createRecordedClass = async (req, res) => {
       recordedDate,
       youtubeUrl,
       durationSeconds,
-      visibilityWindowDays,
     } = req.body;
 
     if (!title || !category || !recordedDate || !youtubeUrl) {
@@ -39,6 +46,13 @@ const createRecordedClass = async (req, res) => {
       });
     }
 
+    // Availability: N days from the class date, until a chosen date, or
+    // never. Nothing sent = schema default (7 days from the class date).
+    const availability = parseAvailabilityInput(req.body);
+    if (availability && !availability.ok) {
+      return res.status(400).json({ success: false, message: availability.message });
+    }
+
     const recordedClass = await recordedClassModel.create({
       title,
       description: description || "",
@@ -50,15 +64,7 @@ const createRecordedClass = async (req, res) => {
         typeof durationSeconds === "number" && durationSeconds > 0
           ? Math.round(durationSeconds)
           : null,
-      // Per-video "visible to students for N days" — null means "never
-      // expires"; omitted entirely means the schema default (7) applies.
-      // See models/recordedClassModel.js for how this is enforced.
-      ...(visibilityWindowDays !== undefined && {
-        visibilityWindowDays:
-          visibilityWindowDays === null
-            ? null
-            : Math.max(0, Math.round(Number(visibilityWindowDays)) || 0),
-      }),
+      ...(availability ? availability.fields : {}),
       uploadedBy: req.user._id,
     });
 
@@ -73,7 +79,7 @@ const createRecordedClass = async (req, res) => {
       createdBy: req.user._id,
     }).catch((err) => console.error("Failed to create video notification:", err.message));
 
-    res.status(201).json({ success: true, data: recordedClass });
+    res.status(201).json({ success: true, data: withAvailability(recordedClass) });
   } catch (error) {
     // Logged server-side so a create failure (validation, duplicate key,
     // storage-quota, connection issue, etc.) is actually diagnosable from
@@ -101,7 +107,10 @@ const listRecordedClasses = async (req, res) => {
       .populate("uploadedBy", "username email")
       .sort({ recordedDate: -1, createdAt: -1 });
 
-    res.status(200).json({ success: true, data: recordedClasses });
+    res.status(200).json({
+      success: true,
+      data: recordedClasses.map((rc) => withAvailability(rc)),
+    });
   } catch (error) {
     res.status(500).json({
       success: false,
@@ -127,7 +136,6 @@ const updateRecordedClass = async (req, res) => {
       recordedDate,
       youtubeUrl,
       durationSeconds,
-      visibilityWindowDays,
       active,
     } = req.body;
 
@@ -138,14 +146,11 @@ const updateRecordedClass = async (req, res) => {
     if (subject !== undefined) update.subject = subject || null;
     if (recordedDate !== undefined) update.recordedDate = recordedDate;
     if (active !== undefined) update.active = active;
-    if (visibilityWindowDays !== undefined) {
-      // Explicit null = "never expires"; a number = that many days from
-      // recordedDate before it drops out of students' list.
-      update.visibilityWindowDays =
-        visibilityWindowDays === null
-          ? null
-          : Math.max(0, Math.round(Number(visibilityWindowDays)) || 0);
+    const availability = parseAvailabilityInput(req.body);
+    if (availability && !availability.ok) {
+      return res.status(400).json({ success: false, message: availability.message });
     }
+    if (availability) Object.assign(update, availability.fields);
     if (durationSeconds !== undefined) {
       update.durationSeconds =
         typeof durationSeconds === "number" && durationSeconds > 0
@@ -171,7 +176,7 @@ const updateRecordedClass = async (req, res) => {
       return res.status(404).json({ success: false, message: "Recorded class not found." });
     }
 
-    res.status(200).json({ success: true, data: recordedClass });
+    res.status(200).json({ success: true, data: withAvailability(recordedClass) });
   } catch (error) {
     console.error("Failed to update recorded class:", error.name, error.message);
     res.status(500).json({
@@ -311,10 +316,82 @@ const getStudentVideoAnalytics = async (req, res) => {
   }
 };
 
+// PATCH /api/recorded-classes/bulk-availability (admin only) — change how
+// long several recordings stay visible to students in one go (the table's
+// checkboxes), or extend them. Body: { ids: [...] } plus EITHER the usual
+// availability choice ({ availabilityMode: "days" | "date" | "never",
+// availabilityDays, availableUntilDate }) OR { extendDays: N } to push each
+// recording's end date N days later — counted from today if it has
+// already expired, so an expired class comes back for N days.
+const bulkUpdateAvailability = async (req, res) => {
+  try {
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids.filter(Boolean) : [];
+    if (ids.length === 0) {
+      return res.status(400).json({ success: false, message: "Select at least one recording." });
+    }
+
+    if (req.body.extendDays !== undefined) {
+      const extendDays = Math.round(Number(req.body.extendDays));
+      if (!Number.isFinite(extendDays) || extendDays < 1 || extendDays > MAX_DAYS) {
+        return res.status(400).json({
+          success: false,
+          message: `Extend by 1 to ${MAX_DAYS} days.`,
+        });
+      }
+      const recordings = await recordedClassModel.find({ _id: { $in: ids } });
+      const ops = [];
+      let skippedNever = 0;
+      for (const rec of recordings) {
+        const currentUntil = getAvailableUntil(rec);
+        if (currentUntil === null) {
+          skippedNever++; // already never expires — nothing to extend
+          continue;
+        }
+        const from = Math.max(Date.now(), currentUntil.getTime());
+        ops.push({
+          updateOne: {
+            filter: { _id: rec._id },
+            update: { $set: { availableUntil: endOfIstDay(from + extendDays * DAY_MS) } },
+          },
+        });
+      }
+      if (ops.length) await recordedClassModel.bulkWrite(ops);
+      return res.status(200).json({
+        success: true,
+        updated: ops.length,
+        skippedNeverExpires: skippedNever,
+      });
+    }
+
+    const availability = parseAvailabilityInput(req.body);
+    if (!availability) {
+      return res.status(400).json({ success: false, message: "Choose how long these stay available." });
+    }
+    if (!availability.ok) {
+      return res.status(400).json({ success: false, message: availability.message });
+    }
+
+    const result = await recordedClassModel.updateMany(
+      { _id: { $in: ids } },
+      { $set: availability.fields }
+    );
+
+    res.status(200).json({ success: true, updated: result.modifiedCount });
+  } catch (error) {
+    console.error("Failed to bulk-update availability:", error.name, error.message);
+    res.status(500).json({
+      success: false,
+      message: "Failed to update availability.",
+      error: error.message,
+    });
+  }
+};
+
 module.exports = {
   createRecordedClass,
   listRecordedClasses,
   updateRecordedClass,
+  bulkUpdateAvailability,
   deleteRecordedClass,
   getVideoAnalytics,
   getStudentVideoAnalytics,

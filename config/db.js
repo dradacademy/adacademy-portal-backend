@@ -4,6 +4,7 @@ const {
 } = require("../controllers/durationController");
 const { ensureMarkConfigExists } = require("../controllers/markController");
 const recordedClassModel = require("../models/recordedClassModel");
+const { runOneTimeAvailabilityGrant } = require("../utils/oneTimeAvailabilityGrant");
 
 const connectWithRetry = (retryCount = 4) => {
   mongoose
@@ -35,6 +36,10 @@ const connectWithRetry = (retryCount = 4) => {
       } catch (syncError) {
         console.error("Failed to sync RecordedClass indexes:", syncError.message);
       }
+
+      // One-time: every existing class available for 14 days from deploy
+      // (see utils/oneTimeAvailabilityGrant.js). No-op after the first run.
+      await runOneTimeAvailabilityGrant();
 
       console.log("MongoDB connection established...");
     })

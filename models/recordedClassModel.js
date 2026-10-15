@@ -1,5 +1,6 @@
 const mongoose = require("mongoose");
 const { EXAM_CATEGORIES } = require("../constants/examCategories");
+const { isAvailableToStudents } = require("../utils/classAvailability");
 
 // A single recorded class, hosted on the admin's own YouTube account (as an
 // Unlisted video) and referenced here by its video ID — replacing both the
@@ -79,6 +80,14 @@ const recordedClassSchema = new mongoose.Schema(
       default: 7,
       min: 0,
     },
+    // "Available until" a chosen calendar date (stored as 11:59 PM IST on
+    // that day). When set, it takes priority over visibilityWindowDays.
+    // null = use visibilityWindowDays (or never, if that is null too).
+    // See utils/classAvailability.js for the full rule.
+    availableUntil: {
+      type: Date,
+      default: null,
+    },
     // Set when this recording was created automatically by "End Live" on a
     // live class (see addRecordingFromLiveClass in liveClassController.js).
     // null for recordings the admin added manually via "Add Recording".
@@ -107,14 +116,7 @@ recordedClassSchema.index({ category: 1, youtubeVideoId: 1 });
 // window hasn't elapsed since recordedDate yet). Not applied to the
 // admin's own listing/analytics, which always show every video.
 recordedClassSchema.methods.isVisibleToStudents = function () {
-  if (!this.active) return false;
-  if (this.visibilityWindowDays === null || this.visibilityWindowDays === undefined) {
-    return true;
-  }
-  const cutoff =
-    new Date(this.recordedDate).getTime() +
-    this.visibilityWindowDays * 24 * 60 * 60 * 1000;
-  return Date.now() <= cutoff;
+  return isAvailableToStudents(this);
 };
 
 const RecordedClass = mongoose.model("RecordedClass", recordedClassSchema);

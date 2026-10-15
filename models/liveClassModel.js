@@ -66,6 +66,20 @@ const liveClassSchema = new mongoose.Schema(
       type: Number,
       default: null,
     },
+    // How long the REPLAY stays watchable for students once this class
+    // ends and is added to Recorded Classes — chosen on the Go Live form
+    // (or later via Edit) and copied onto that recording. Same rule as
+    // RecordedClass (see utils/classAvailability.js): N days counted from
+    // the class date (startedAt), or until a chosen date, or never.
+    visibilityWindowDays: {
+      type: Number,
+      default: 7,
+      min: 0,
+    },
+    availableUntil: {
+      type: Date,
+      default: null,
+    },
   },
   { timestamps: true }
 );

@@ -8,6 +8,7 @@ const Attachment = require("../models/attachmentModel");
 const AttachmentProgress = require("../models/attachmentProgressModel");
 const progressWeightConfigModel = require("../models/progressWeightConfigModel");
 const { isVideoComplete } = require("./attendanceHelper");
+const { isAvailableToStudents } = require("./classAvailability");
 
 const DEFAULT_WEIGHTS = { examWeight: 40, videoWeight: 40, attachmentWeight: 20 };
 
@@ -27,17 +28,9 @@ const getWeightConfig = async () => {
 };
 
 // Same "still visible to students" rule as recordedClassModel.js's
-// isVisibleToStudents() instance method, reimplemented here in plain JS
-// because this helper works over .lean() documents (no schema methods).
-const isVideoVisible = (video) => {
-  if (!video.active) return false;
-  if (video.visibilityWindowDays === null || video.visibilityWindowDays === undefined) {
-    return true;
-  }
-  const cutoff =
-    new Date(video.recordedDate).getTime() + video.visibilityWindowDays * 24 * 60 * 60 * 1000;
-  return Date.now() <= cutoff;
-};
+// isVisibleToStudents() — shared from utils/classAvailability.js so this
+// works over .lean() documents too.
+const isVideoVisible = (video) => isAvailableToStudents(video);
 
 // Computes learning-progress figures for a batch of students in bulk
 // (never one query per student — see the rank-computation N+1 bug already
@@ -87,7 +80,7 @@ const computeStudentProgress = async (students) => {
   const [subjects, recordedClasses, attachments] = await Promise.all([
     Subject.find({ category: { $in: categories } }).select("_id category").lean(),
     RecordedClass.find({ category: { $in: categories } })
-      .select("_id title category durationSeconds visibilityWindowDays recordedDate active")
+      .select("_id title category durationSeconds visibilityWindowDays availableUntil recordedDate active")
       .lean(),
     Attachment.find({ category: { $in: categories }, active: true })
       .select("_id title category")

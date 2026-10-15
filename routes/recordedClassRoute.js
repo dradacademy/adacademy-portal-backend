@@ -4,6 +4,7 @@ const {
   createRecordedClass,
   listRecordedClasses,
   updateRecordedClass,
+  bulkUpdateAvailability,
   deleteRecordedClass,
   getVideoAnalytics,
   getStudentVideoAnalytics,
@@ -18,6 +19,8 @@ router.use(verifyToken, authorizeRoles("admin"));
 
 router.post("/", createRecordedClass);
 router.get("/", listRecordedClasses);
+// Must come before "/:id" so "bulk-availability" isn't read as an id.
+router.patch("/bulk-availability", bulkUpdateAvailability);
 router.patch("/:id", updateRecordedClass);
 router.delete("/:id", deleteRecordedClass);
 router.get("/analytics", getVideoAnalytics);

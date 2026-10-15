@@ -3,6 +3,7 @@ const { buildPingUpdate, recordedWatchStats } = require("../utils/watchTime");
 const videoProgressModel = require("../models/videoProgressModel");
 const enrollmentModel = require("../models/enrollmentModel");
 const { isEnrollmentActive } = require("../models/enrollmentModel");
+const { getAvailableUntil } = require("../utils/classAvailability");
 
 // GET /api/videos/available (student) — every ready, active recording in
 // this student's category, annotated with their own watch progress (for
@@ -30,7 +31,7 @@ const listAvailableVideos = async (req, res) => {
       recordedClassModel
         .find({ category: req.user.category, active: true })
         .select(
-          "title description category subject recordedDate durationSeconds visibilityWindowDays active"
+          "title description category subject recordedDate durationSeconds visibilityWindowDays availableUntil active"
         )
         .sort({ recordedDate: -1 }),
       enrollmentModel.findOne({
@@ -59,6 +60,10 @@ const listAvailableVideos = async (req, res) => {
         description: video.description,
         recordedDate: video.recordedDate,
         durationSeconds: video.durationSeconds,
+        // When this class drops off the student's list (11:59 PM IST on
+        // its last day), or null if it never expires — shown on the card
+        // as "Available till ...".
+        availableUntil: getAvailableUntil(video),
         lastPositionSeconds: progress?.lastPositionSeconds || 0,
         percentWatched: Number(percentWatched.toFixed(1)),
         // Lets the frontend show a clear "enrollment expired" state instead
