@@ -173,6 +173,7 @@ const listAvailableAttachments = async (req, res) => {
       attachmentModel
         .find({ category: req.user.category, active: true })
         .select("title description category subject contentType fileSize createdAt")
+        .populate("subject", "name")
         .sort({ createdAt: -1 }),
       enrollmentModel.findOne({ userId: req.user._id, category: req.user.category }),
       attachmentProgressModel.find({ userId: req.user._id }),
@@ -187,6 +188,8 @@ const listAvailableAttachments = async (req, res) => {
       _id: att._id,
       title: att.title,
       description: att.description,
+      // Subject name for the card cover (null if the material has none).
+      subject: att.subject ? { _id: att.subject._id, name: att.subject.name } : null,
       contentType: att.contentType,
       fileSize: att.fileSize,
       createdAt: att.createdAt,
