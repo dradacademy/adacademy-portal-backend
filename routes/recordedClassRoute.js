@@ -5,6 +5,7 @@ const {
   listRecordedClasses,
   updateRecordedClass,
   bulkUpdateAvailability,
+  bulkGroupRecordedClasses,
   deleteRecordedClass,
   getVideoAnalytics,
   getStudentVideoAnalytics,
@@ -21,6 +22,7 @@ router.post("/", createRecordedClass);
 router.get("/", listRecordedClasses);
 // Must come before "/:id" so "bulk-availability" isn't read as an id.
 router.patch("/bulk-availability", bulkUpdateAvailability);
+router.patch("/bulk-group", bulkGroupRecordedClasses);
 router.patch("/:id", updateRecordedClass);
 router.delete("/:id", deleteRecordedClass);
 router.get("/analytics", getVideoAnalytics);

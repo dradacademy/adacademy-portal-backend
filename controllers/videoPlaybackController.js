@@ -4,6 +4,7 @@ const videoProgressModel = require("../models/videoProgressModel");
 const enrollmentModel = require("../models/enrollmentModel");
 const { isEnrollmentActive } = require("../models/enrollmentModel");
 const { getAvailableUntil } = require("../utils/classAvailability");
+const { loadSubjectLookup, describeGrouping } = require("../utils/recordedClassGrouping");
 
 // GET /api/videos/available (student) — every ready, active recording in
 // this student's category, annotated with their own watch progress (for
@@ -31,7 +32,7 @@ const listAvailableVideos = async (req, res) => {
       recordedClassModel
         .find({ category: req.user.category, active: true })
         .select(
-          "title description category subject recordedDate durationSeconds visibilityWindowDays availableUntil active"
+          "title description category subject subtopic subtopicName recordedDate durationSeconds visibilityWindowDays availableUntil active"
         )
         .sort({ recordedDate: -1 }),
       enrollmentModel.findOne({
@@ -48,6 +49,9 @@ const listAvailableVideos = async (req, res) => {
     );
 
     const enrollmentActive = isEnrollmentActive(enrollment);
+    // Current subject/subtopic names, so students can browse
+    // Subject → Subtopic → by date.
+    const subjectLookup = await loadSubjectLookup(videos);
 
     const data = videos.map((video) => {
       const progress = progressByVideoId.get(video._id.toString());
@@ -60,6 +64,7 @@ const listAvailableVideos = async (req, res) => {
         description: video.description,
         recordedDate: video.recordedDate,
         durationSeconds: video.durationSeconds,
+        ...describeGrouping(video, subjectLookup),
         // When this class drops off the student's list (11:59 PM IST on
         // its last day), or null if it never expires — shown on the card
         // as "Available till ...".

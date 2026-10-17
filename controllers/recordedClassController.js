@@ -2,6 +2,7 @@ const recordedClassModel = require("../models/recordedClassModel");
 const { recordedWatchStats } = require("../utils/watchTime");
 const videoProgressModel = require("../models/videoProgressModel");
 const userModel = require("../models/userModel");
+const subjectModel = require("../models/subjectModel");
 const { extractYoutubeVideoId } = require("../utils/youtube");
 const { createNotification } = require("./notificationController");
 const {
@@ -12,6 +13,18 @@ const {
   parseAvailabilityInput,
   withAvailability,
 } = require("../utils/classAvailability");
+const {
+  resolveGrouping,
+  loadSubjectLookup,
+  describeGrouping,
+} = require("../utils/recordedClassGrouping");
+
+// Admin listing row: availability info + current subject/subtopic names.
+const toAdminRow = (rec, lookup) => {
+  const row = withAvailability(rec);
+  const grouping = describeGrouping(rec, lookup);
+  return { ...row, subject: grouping.subject, subtopic: grouping.subtopic };
+};
 
 // POST /api/recorded-classes (admin only) — the admin uploads the class
 // recording to their own YouTube account (as Unlisted, so it isn't publicly
@@ -25,6 +38,7 @@ const createRecordedClass = async (req, res) => {
       description,
       category,
       subject,
+      subtopic,
       recordedDate,
       youtubeUrl,
       durationSeconds,
@@ -53,11 +67,16 @@ const createRecordedClass = async (req, res) => {
       return res.status(400).json({ success: false, message: availability.message });
     }
 
+    const grouping = await resolveGrouping({ category, subject, subtopic });
+    if (!grouping.ok) {
+      return res.status(400).json({ success: false, message: grouping.message });
+    }
+
     const recordedClass = await recordedClassModel.create({
       title,
       description: description || "",
       category,
-      subject: subject || null,
+      ...grouping.fields,
       youtubeVideoId,
       recordedDate,
       durationSeconds:
@@ -79,7 +98,8 @@ const createRecordedClass = async (req, res) => {
       createdBy: req.user._id,
     }).catch((err) => console.error("Failed to create video notification:", err.message));
 
-    res.status(201).json({ success: true, data: withAvailability(recordedClass) });
+    const lookup = await loadSubjectLookup([recordedClass]);
+    res.status(201).json({ success: true, data: toAdminRow(recordedClass, lookup) });
   } catch (error) {
     // Logged server-side so a create failure (validation, duplicate key,
     // storage-quota, connection issue, etc.) is actually diagnosable from
@@ -103,13 +123,13 @@ const listRecordedClasses = async (req, res) => {
 
     const recordedClasses = await recordedClassModel
       .find(filter)
-      .populate("subject", "name")
       .populate("uploadedBy", "username email")
       .sort({ recordedDate: -1, createdAt: -1 });
 
+    const lookup = await loadSubjectLookup(recordedClasses);
     res.status(200).json({
       success: true,
-      data: recordedClasses.map((rc) => withAvailability(rc)),
+      data: recordedClasses.map((rc) => toAdminRow(rc, lookup)),
     });
   } catch (error) {
     res.status(500).json({
@@ -133,17 +153,44 @@ const updateRecordedClass = async (req, res) => {
       description,
       category,
       subject,
+      subtopic,
       recordedDate,
       youtubeUrl,
       durationSeconds,
       active,
     } = req.body;
 
+    const existing = await recordedClassModel.findById(id).select("category subject subtopic");
+    if (!existing) {
+      return res.status(404).json({ success: false, message: "Recorded class not found." });
+    }
+
     const update = {};
     if (title !== undefined) update.title = title;
     if (description !== undefined) update.description = description;
     if (category !== undefined) update.category = category;
-    if (subject !== undefined) update.subject = subject || null;
+    // Subject/subtopic: validated together against the (possibly new)
+    // category. Changing only the category re-checks the current subject,
+    // and clears it if it belongs to the old category.
+    if (subject !== undefined || subtopic !== undefined || category !== undefined) {
+      const targetCategory = category !== undefined ? category : existing.category;
+      const grouping = await resolveGrouping({
+        category: targetCategory,
+        subject: subject !== undefined ? subject : existing.subject,
+        subtopic:
+          subtopic !== undefined
+            ? subtopic
+            : subject !== undefined && String(subject || "") !== String(existing.subject || "")
+            ? null
+            : existing.subtopic,
+      });
+      if (grouping.ok) Object.assign(update, grouping.fields);
+      else if (subject !== undefined || subtopic !== undefined) {
+        return res.status(400).json({ success: false, message: grouping.message });
+      } else {
+        Object.assign(update, { subject: null, subtopic: null, subtopicName: "" });
+      }
+    }
     if (recordedDate !== undefined) update.recordedDate = recordedDate;
     if (active !== undefined) update.active = active;
     const availability = parseAvailabilityInput(req.body);
@@ -176,7 +223,8 @@ const updateRecordedClass = async (req, res) => {
       return res.status(404).json({ success: false, message: "Recorded class not found." });
     }
 
-    res.status(200).json({ success: true, data: withAvailability(recordedClass) });
+    const lookup = await loadSubjectLookup([recordedClass]);
+    res.status(200).json({ success: true, data: toAdminRow(recordedClass, lookup) });
   } catch (error) {
     console.error("Failed to update recorded class:", error.name, error.message);
     res.status(500).json({
@@ -387,7 +435,56 @@ const bulkUpdateAvailability = async (req, res) => {
   }
 };
 
+// PATCH /api/recorded-classes/bulk-group (admin only) — put several
+// recordings under one Subject (and optionally one Subtopic) in one go —
+// how existing, ungrouped recordings get organised. Body: { ids: [...],
+// subject, subtopic }. An empty subject removes the grouping. Recordings
+// from a different exam category than the subject are skipped (a subject
+// belongs to exactly one category) and reported back.
+const bulkGroupRecordedClasses = async (req, res) => {
+  try {
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids.filter(Boolean) : [];
+    if (ids.length === 0) {
+      return res.status(400).json({ success: false, message: "Select at least one recording." });
+    }
+    const { subject, subtopic } = req.body;
+
+    const grouping = await resolveGrouping({ subject, subtopic });
+    if (!grouping.ok) {
+      return res.status(400).json({ success: false, message: grouping.message });
+    }
+
+    let filter = { _id: { $in: ids } };
+    let skippedOtherCategory = 0;
+    if (grouping.fields.subject) {
+      const subjectDoc = await subjectModel
+        .findById(grouping.fields.subject)
+        .select("category");
+      skippedOtherCategory = await recordedClassModel.countDocuments({
+        _id: { $in: ids },
+        category: { $ne: subjectDoc.category },
+      });
+      filter = { _id: { $in: ids }, category: subjectDoc.category };
+    }
+
+    const result = await recordedClassModel.updateMany(filter, { $set: grouping.fields });
+    res.status(200).json({
+      success: true,
+      updated: result.matchedCount,
+      skippedOtherCategory,
+    });
+  } catch (error) {
+    console.error("Failed to bulk-group recordings:", error.name, error.message);
+    res.status(500).json({
+      success: false,
+      message: "Failed to group recordings.",
+      error: error.message,
+    });
+  }
+};
+
 module.exports = {
+  bulkGroupRecordedClasses,
   createRecordedClass,
   listRecordedClasses,
   updateRecordedClass,

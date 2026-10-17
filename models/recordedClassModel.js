@@ -39,6 +39,23 @@ const recordedClassSchema = new mongoose.Schema(
       ref: "Subject",
       default: null,
     },
+    // Which subtopic (inside `subject`) this class covers — the _id of one
+    // entry in that Subject's `subtopics` array (the same subtopics used
+    // for exams, managed on the admin Subjects page). Students browse
+    // Recorded Classes as Subject → Subtopic → by date. null = not grouped
+    // under a subtopic yet. Grouping only; it does NOT gate access.
+    subtopic: {
+      type: mongoose.Schema.Types.ObjectId,
+      default: null,
+    },
+    // Name of that subtopic when it was set — a fallback label in case the
+    // subtopic is later deleted from the Subject (the live Subject's name
+    // is shown whenever the subtopic still exists, so renames carry over).
+    subtopicName: {
+      type: String,
+      default: "",
+      trim: true,
+    },
     // The 11-character YouTube video ID (extracted from whatever URL format
     // the admin pastes — watch?v=, youtu.be/, embed/, shorts/ — see
     // utils/youtube.js). This is the only identifier needed to embed the
