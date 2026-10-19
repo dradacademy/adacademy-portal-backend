@@ -203,7 +203,7 @@ const createExam = async (req, res) => {
       !questions ||
       !passPercentage
     ) {
-      return res.status(400).json({ error: "All fields are required" });
+      return res.status(400).json({ success: false, message: "All fields are required (subject, subtopic, status, pass percentage and at least one question).", error: "All fields are required" });
     }
 
     if (questions.some((q) => !q.level)) {
@@ -507,7 +507,7 @@ const updateExam = async (req, res) => {
       !questions ||
       !passPercentage
     ) {
-      return res.status(400).json({ error: "All fields are required" });
+      return res.status(400).json({ success: false, message: "All fields are required (subject, subtopic, status, pass percentage and at least one question).", error: "All fields are required" });
     }
 
     if (questions.some((q) => !q.level)) {
