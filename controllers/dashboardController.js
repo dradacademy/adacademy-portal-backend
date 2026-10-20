@@ -20,7 +20,10 @@ const {
 const getAllExamsOverview = async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 50;
+    // Default is "all exams" (was 50). The admin dashboard never sent a
+    // limit, so with more than 50 exams the older ones silently vanished
+    // from the grid AND from the summary cards (Total Submissions etc.).
+    const limit = parseInt(req.query.limit) || 10000;
     const skip = (page - 1) * limit;
 
     // Admin's category-organized workflow: optionally scope this whole
@@ -218,21 +221,81 @@ const getAllExamsOverview = async (req, res) => {
       Exam.countDocuments(examMatch),
     ]);
 
-    // Calculate overall statistics
-    const totalStudents = examsData.reduce(
-      (sum, exam) => sum + exam.totalSubmissions,
-      0,
-    );
-    const overallAvgScore =
-      examsData.length > 0
-        ? examsData.reduce((sum, exam) => sum + exam.avgScore, 0) /
-          examsData.length
-        : 0;
-    const overallPassRate =
-      examsData.length > 0
-        ? examsData.reduce((sum, exam) => sum + exam.passRate, 0) /
-          examsData.length
-        : 0;
+    // Calculate overall statistics across EVERY exam in scope (not just
+    // the current page), so the cards always match the whole portal.
+    //  - totalStudents: each student's latest attempt per exam (the same
+    //    "last attempt only" rule as the per-exam rows).
+    //  - totalAttempts: every attempt ever made, retakes included.
+    //  - overallAvgScore: average PERCENTAGE of completed latest attempts
+    //    (marks / exam total marks x 100). Previously this averaged raw
+    //    marks per exam, counting exams with no attempts as 0, which gave
+    //    misleading values like "2.6%".
+    //  - overallPassRate: passed / completed, over completed latest attempts.
+    const allExamIds = await Exam.find(examMatch).distinct("_id");
+    const [latestAgg, totalAttempts, markData, examsWithQuestions] =
+      await Promise.all([
+        ExamSubmission.aggregate([
+          { $match: { examId: { $in: allExamIds } } },
+          { $sort: { userId: 1, examId: 1, attemptNumber: -1 } },
+          {
+            $group: {
+              _id: { u: "$userId", e: "$examId" },
+              doc: { $first: "$$ROOT" },
+            },
+          },
+          {
+            $project: {
+              _id: 0,
+              examId: "$doc.examId",
+              status: "$doc.status",
+              pass: "$doc.pass",
+              obtainedMark: "$doc.obtainedMark",
+            },
+          },
+        ]),
+        ExamSubmission.countDocuments({ examId: { $in: allExamIds } }),
+        markModel.findById("mark-based-on-levels").lean(),
+        Exam.find({ _id: { $in: allExamIds } })
+          .select("questions")
+          .populate("questions", "marks negativeMark level")
+          .lean(),
+      ]);
+
+    const totalMarksByExam = new Map();
+    examsWithQuestions.forEach((exam) => {
+      totalMarksByExam.set(
+        String(exam._id),
+        markData
+          ? calculateTotalPossibleMarks(exam.questions || [], markData)
+          : 0,
+      );
+    });
+
+    const totalStudents = latestAgg.length;
+    let completed = 0;
+    let passed = 0;
+    let pctSum = 0;
+    let pctCount = 0;
+    latestAgg.forEach((sub) => {
+      if (sub.status !== "completed") return;
+      completed++;
+      if (sub.pass === true) passed++;
+      const total = totalMarksByExam.get(String(sub.examId)) || 0;
+      if (total > 0) {
+        pctSum += ((sub.obtainedMark || 0) / total) * 100;
+        pctCount++;
+      }
+    });
+    const overallAvgScore = pctCount > 0 ? pctSum / pctCount : 0;
+    const overallPassRate = completed > 0 ? (passed / completed) * 100 : 0;
+
+    // Per-exam average as a percentage too, for the exam cards.
+    examsData.forEach((exam) => {
+      const total = totalMarksByExam.get(String(exam._id)) || 0;
+      exam.totalMarks = total;
+      exam.avgPercentage =
+        total > 0 ? parseFloat(((exam.avgScore / total) * 100).toFixed(2)) : 0;
+    });
 
     res.status(200).json({
       success: true,
@@ -240,6 +303,8 @@ const getAllExamsOverview = async (req, res) => {
         exams: examsData,
         statistics: {
           totalStudents,
+          totalAttempts,
+          completedSubmissions: completed,
           overallAvgScore: parseFloat(overallAvgScore.toFixed(2)),
           overallPassRate: parseFloat(overallPassRate.toFixed(2)),
           totalExams: totalCount,

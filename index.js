@@ -40,8 +40,8 @@ app.set("trust proxy", 1);
 //   });
 // } else {
   app.use(cookieParser());
-  app.use(express.json());
-  app.use(express.urlencoded({ extended: true }));
+  app.use(express.json({ limit: "10mb" }));
+  app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
   // CLIENT_URL is the one canonical frontend URL (also used to build the
   // /portal/* login-redirect fallback below, so it must stay a single URL).
