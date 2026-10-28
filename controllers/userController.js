@@ -698,6 +698,8 @@ const getUserData = async (req, res) => {
         .findOne({ userId: userData._id })
         .select("status");
       responseData.profileCompleted = profile?.status === "submitted";
+      // Daily Study Tracker (2026-10-28): shows the "My Study Plan" link.
+      responseData.studyTracker = await require("./studyTrackerController").studentGetsTracker(userData);
     }
 
     res.status(200).json(responseData);
