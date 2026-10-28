@@ -1,6 +1,8 @@
 const recordedClassModel = require("../models/recordedClassModel");
 const { buildPingUpdate, recordedWatchStats } = require("../utils/watchTime");
 const videoProgressModel = require("../models/videoProgressModel");
+const VideoCommitment = require("../models/videoCommitmentModel");
+const { isVideoComplete } = require("../utils/attendanceHelper");
 const enrollmentModel = require("../models/enrollmentModel");
 const { isEnrollmentActive } = require("../models/enrollmentModel");
 const { getAvailableUntil } = require("../utils/classAvailability");
@@ -203,6 +205,22 @@ const recordProgress = async (req, res) => {
       update,
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
+
+    // Pending Videos popup: stamp the moment this video first counts as
+    // finished, so the admin's Video Tracker can tell "finished by the
+    // promised date" from "finished late". Only touches a row that exists
+    // and isn't stamped yet; never blocks the ping.
+    try {
+      const { percentWatched } = recordedWatchStats(progress, video.durationSeconds || 0);
+      if (video.durationSeconds > 0 && isVideoComplete(percentWatched)) {
+        await VideoCommitment.updateOne(
+          { userId: req.user._id, videoId: id, completedAt: null },
+          { $set: { completedAt: new Date() } }
+        );
+      }
+    } catch (stampError) {
+      console.error("Video commitment completion stamp failed:", stampError.message);
+    }
 
     res.status(200).json({ success: true, data: progress });
   } catch (error) {
