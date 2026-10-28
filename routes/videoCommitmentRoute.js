@@ -8,6 +8,8 @@ const {
   getStudentDetail,
   setBatchForStudents,
   updateSettings,
+  markWatched,
+  unmarkWatched,
 } = require("../controllers/videoCommitmentController");
 
 // Pending Videos popup (student) + Video Tracker (admin) — 2026-10-28.
@@ -23,5 +25,7 @@ router.get("/admin", authorizeRoles("admin"), getTracker);
 router.get("/admin/student/:studentId", authorizeRoles("admin"), getStudentDetail);
 router.patch("/admin/batch", authorizeRoles("admin"), setBatchForStudents);
 router.patch("/admin/settings", authorizeRoles("admin"), updateSettings);
+router.post("/admin/mark-watched", authorizeRoles("admin"), markWatched);
+router.post("/admin/unmark-watched", authorizeRoles("admin"), unmarkWatched);
 
 module.exports = router;

@@ -1,6 +1,7 @@
 const mongoose = require("mongoose");
 const userModel = require("../models/userModel");
 const VideoCommitment = require("../models/videoCommitmentModel");
+const VideoWatchOverride = require("../models/videoWatchOverrideModel");
 const {
   istYmd,
   endOfIstDayFromYmd,
@@ -75,7 +76,9 @@ const getMyPending = async (req, res) => {
   }
 };
 
-// POST /api/video-commitments/me (student) — body { items: [{ videoId, date: "YYYY-MM-DD" }] }
+// POST /api/video-commitments/me (student) — body { items: [{ videoId, date: "YYYY-MM-DD" }
+//   or { videoId, watchedOnYoutube: true }] } — the second form is the
+//   "I already watched this fully on YouTube" tick box.
 const saveMyDates = async (req, res) => {
   try {
     const config = await getCommitmentConfig();
@@ -89,9 +92,14 @@ const saveMyDates = async (req, res) => {
 
     const errors = [];
     const valid = [];
+    const watchedElsewhere = [];
     for (const row of input) {
       const item = pendingById.get(String(row?.videoId));
       if (!item) continue; // finished meanwhile, or not theirs — just skip
+      if (row?.watchedOnYoutube === true) {
+        watchedElsewhere.push(item);
+        continue;
+      }
       const date = String(row?.date || "").trim();
       const end = endOfIstDayFromYmd(date);
       if (!end) {
@@ -106,6 +114,15 @@ const saveMyDates = async (req, res) => {
     }
     if (errors.length) {
       return res.status(400).json({ success: false, message: errors[0], errors });
+    }
+
+    // "Already watched on YouTube" — never overwrites an admin mark.
+    for (const item of watchedElsewhere) {
+      await VideoWatchOverride.updateOne(
+        { userId: req.user._id, videoId: item.videoId },
+        { $setOnInsert: { source: "student", markedAt: new Date() } },
+        { upsert: true }
+      );
     }
 
     const existing = await VideoCommitment.find({
@@ -216,6 +233,7 @@ const getTracker = async (req, res) => {
           videoAgg.set(vid, {
             students: 0, done: 0, partial: 0, notStarted: 0,
             noDate: 0, upcoming: 0, missed: 0, doneOnTime: 0, doneLate: 0,
+            selfReported: 0, adminMarked: 0,
             pendingStudents: [],
           });
         }
@@ -229,6 +247,8 @@ const getTracker = async (req, res) => {
         if (it.status === "missed") agg.missed += 1;
         if (it.status === "done_on_time") agg.doneOnTime += 1;
         if (it.status === "done_late") agg.doneLate += 1;
+        if (it.status === "self_reported") agg.selfReported += 1;
+        if (it.status === "admin_marked") agg.adminMarked += 1;
         if (PENDING_STATUSES.has(it.status)) {
           agg.pendingStudents.push({
             studentId: s._id,
@@ -287,6 +307,9 @@ const getTracker = async (req, res) => {
       partialVideos: total("partial"),
       doneOnTime: total("doneOnTime"),
       doneLate: total("doneLate"),
+      selfReported: total("selfReported"),
+      studentsSelfReported: count((r) => r.selfReported > 0),
+      adminMarked: total("adminMarked"),
       missedNow: total("missed"),
       videosTracked: videoRows.length,
       videosWithoutDuration: noDuration.length,
@@ -337,6 +360,8 @@ const getStudentDetail = async (req, res) => {
         percentWatched: it.percentWatched,
         watchState: it.watchState,
         status: it.status,
+        measuredComplete: it.measuredComplete,
+        markedWatched: it.override ? { source: it.override.source, markedAt: it.override.markedAt } : null,
         lastWatchedAt: it.lastWatchedAt,
         targetDate: c ? istYmd(c.targetDate) : null,
         firstTargetDate: c ? istYmd(c.firstTargetDate) : null,
@@ -350,7 +375,7 @@ const getStudentDetail = async (req, res) => {
         })),
       };
     });
-    const order = { missed: 0, no_date: 1, upcoming: 2, done_late: 3, done_on_time: 4, done: 5 };
+    const order = { missed: 0, no_date: 1, upcoming: 2, self_reported: 3, admin_marked: 4, done_late: 5, done_on_time: 6, done: 7 };
     items.sort((a, b) => order[a.status] - order[b.status] || new Date(a.recordedDate) - new Date(b.recordedDate));
 
     res.status(200).json({
@@ -432,6 +457,61 @@ const updateSettings = async (req, res) => {
   }
 };
 
+// POST /api/video-commitments/admin/mark-watched
+//   body { videoId, studentIds: [...] }  (one video, many students)
+//   or   { studentId, videoIds: [...] }  (one student, many videos)
+// Counts the video as watched for those students (e.g. they attended the
+// class, or watched it on YouTube). Replaces a student's own "says watched"
+// tick with the admin's mark.
+const markWatched = async (req, res) => {
+  try {
+    const { videoId, studentIds, studentId, videoIds } = req.body || {};
+    const isId = (v) => mongoose.Types.ObjectId.isValid(String(v || ""));
+    let pairs = [];
+    if (isId(videoId) && Array.isArray(studentIds)) {
+      pairs = studentIds.filter(isId).map((u) => [u, videoId]);
+    } else if (isId(studentId) && Array.isArray(videoIds)) {
+      pairs = videoIds.filter(isId).map((v) => [studentId, v]);
+    }
+    pairs = pairs.slice(0, 2000);
+    if (pairs.length === 0) {
+      return res.status(400).json({ success: false, message: "Nothing selected." });
+    }
+    const now = new Date();
+    await VideoWatchOverride.bulkWrite(
+      pairs.map(([u, v]) => ({
+        updateOne: {
+          filter: { userId: u, videoId: v },
+          update: { $set: { source: "admin", markedAt: now, markedBy: req.user._id } },
+          upsert: true,
+        },
+      }))
+    );
+    res.status(200).json({ success: true, message: `Marked as watched (${pairs.length}).` });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Failed to mark as watched.", error: error.message });
+  }
+};
+
+// POST /api/video-commitments/admin/unmark-watched — body { studentId, videoId }
+// Removes a "watched" mark (student's own tick or the admin's); the video
+// goes back into the student's pending list and popup.
+const unmarkWatched = async (req, res) => {
+  try {
+    const { studentId, videoId } = req.body || {};
+    if (!mongoose.Types.ObjectId.isValid(String(studentId || "")) || !mongoose.Types.ObjectId.isValid(String(videoId || ""))) {
+      return res.status(400).json({ success: false, message: "Unknown student or video." });
+    }
+    const result = await VideoWatchOverride.deleteOne({ userId: studentId, videoId });
+    res.status(200).json({
+      success: true,
+      message: result.deletedCount ? "Mark removed. The video is pending again." : "There was no mark to remove.",
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Failed to remove the mark.", error: error.message });
+  }
+};
+
 module.exports = {
   getMyPending,
   saveMyDates,
@@ -439,4 +519,6 @@ module.exports = {
   getStudentDetail,
   setBatchForStudents,
   updateSettings,
+  markWatched,
+  unmarkWatched,
 };

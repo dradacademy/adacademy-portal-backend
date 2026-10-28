@@ -4,6 +4,7 @@ const Exam = require("../models/examModel");
 const ExamSubmission = require("../models/examSubmissionSchema");
 const RecordedClass = require("../models/recordedClassModel");
 const VideoProgress = require("../models/videoProgressModel");
+const VideoWatchOverride = require("../models/videoWatchOverrideModel");
 const Attachment = require("../models/attachmentModel");
 const AttachmentProgress = require("../models/attachmentProgressModel");
 const progressWeightConfigModel = require("../models/progressWeightConfigModel");
@@ -120,7 +121,7 @@ const computeStudentProgress = async (students) => {
     attachmentsByCategory.set(c, attachments.filter((a) => a.category === c))
   );
 
-  const [examSubmissions, videoProgressRows, attachmentProgressRows] = await Promise.all([
+  const [examSubmissions, videoProgressRows, attachmentProgressRows, watchOverrideRows] = await Promise.all([
     allActiveExamIds.length
       ? ExamSubmission.find({
           userId: { $in: studentIds },
@@ -133,7 +134,11 @@ const computeStudentProgress = async (students) => {
       : [],
     VideoProgress.find({ userId: { $in: studentIds } }).lean(),
     AttachmentProgress.find({ userId: { $in: studentIds } }).lean(),
+    // "Marked as watched" (student said they watched on YouTube, or the
+    // admin marked it) — counts as completed, same as on the Video Tracker.
+    VideoWatchOverride.find({ userId: { $in: studentIds } }).select("userId videoId source").lean(),
   ]);
+  const watchOverrides = new Set(watchOverrideRows.map((o) => `${o.userId}:${o.videoId}`));
 
   const examSubsByUser = new Map();
   examSubmissions.forEach((sub) => {
@@ -195,7 +200,9 @@ const computeStudentProgress = async (students) => {
         videoId: video._id,
         title: video.title,
         percentWatched: Number(percentWatched.toFixed(1)),
-        completed: isVideoComplete(percentWatched),
+        completed:
+          isVideoComplete(percentWatched) || watchOverrides.has(`${sid}:${video._id}`),
+        markedWatched: watchOverrides.has(`${sid}:${video._id}`),
         lastWatchedAt: row?.lastWatchedAt || null,
       };
     });

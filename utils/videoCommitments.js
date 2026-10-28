@@ -10,6 +10,9 @@
 //       upcoming     — not finished, promised date still ahead
 //       missed       — not finished, promised date has passed
 //       no_date      — not finished, no date promised yet
+//       self_reported — the student says they watched it on YouTube
+//       admin_marked  — the admin marked it as watched
+//     (the last two count as finished; see models/videoWatchOverrideModel.js)
 //
 // Which videos count ("tracked"): recorded classes students can see right
 // now (active + inside their availability window) in the student's
@@ -26,6 +29,7 @@ const RecordedClass = require("../models/recordedClassModel");
 const VideoProgress = require("../models/videoProgressModel");
 const VideoCommitment = require("../models/videoCommitmentModel");
 const VideoCommitmentConfig = require("../models/videoCommitmentConfigModel");
+const VideoWatchOverride = require("../models/videoWatchOverrideModel");
 const enrollmentModel = require("../models/enrollmentModel");
 const { isEnrollmentActive } = require("../models/enrollmentModel");
 const { recordedWatchStats } = require("./watchTime");
@@ -101,7 +105,7 @@ const loadTracking = async (students, { now = Date.now() } = {}) => {
   });
   const trackedVideoIds = visible.filter((v) => v.durationSeconds > 0).map((v) => v._id);
 
-  const [progressRows, commitmentRows, subjectLookup] = await Promise.all([
+  const [progressRows, commitmentRows, overrideRows, subjectLookup] = await Promise.all([
     trackedVideoIds.length
       ? VideoProgress.find({ userId: { $in: studentIds }, videoId: { $in: trackedVideoIds } })
           .select("userId videoId totalWatchSeconds trackingVersion legacyWatchSeconds watchedRanges lastWatchedAt")
@@ -110,12 +114,16 @@ const loadTracking = async (students, { now = Date.now() } = {}) => {
     trackedVideoIds.length
       ? VideoCommitment.find({ userId: { $in: studentIds }, videoId: { $in: trackedVideoIds } }).lean()
       : [],
+    trackedVideoIds.length
+      ? VideoWatchOverride.find({ userId: { $in: studentIds }, videoId: { $in: trackedVideoIds } }).lean()
+      : [],
     loadSubjectLookup(visible),
   ]);
 
   const key = (u, v) => `${u}:${v}`;
   const progressMap = new Map(progressRows.map((r) => [key(r.userId, r.videoId), r]));
   const commitMap = new Map(commitmentRows.map((r) => [key(r.userId, r.videoId), r]));
+  const overrideMap = new Map(overrideRows.map((r) => [key(r.userId, r.videoId), r]));
   const enrollMap = new Map(enrollments.map((e) => [key(e.userId, e.category), e]));
 
   for (const student of students) {
@@ -138,12 +146,17 @@ const loadTracking = async (students, { now = Date.now() } = {}) => {
       const vid = String(video._id);
       const progress = progressMap.get(key(sid, vid)) || null;
       const commitment = commitMap.get(key(sid, vid)) || null;
+      const override = overrideMap.get(key(sid, vid)) || null;
       const { percentWatched } = recordedWatchStats(progress, video.durationSeconds);
-      const complete = isVideoComplete(percentWatched);
+      const measuredComplete = isVideoComplete(percentWatched);
+      // Marked watched (student's word or admin) counts as finished.
+      const complete = measuredComplete || !!override;
       const watchState = complete ? "complete" : percentWatched > 0 ? "partial" : "not_started";
 
       let status;
-      if (complete) {
+      if (!measuredComplete && override) {
+        status = override.source === "admin" ? "admin_marked" : "self_reported";
+      } else if (complete) {
         if (!commitment) status = "done";
         else {
           const finishedAt = commitment.completedAt || progress?.lastWatchedAt || now;
@@ -161,6 +174,8 @@ const loadTracking = async (students, { now = Date.now() } = {}) => {
         watchState,
         status,
         commitment,
+        override,
+        measuredComplete,
         lastWatchedAt: progress?.lastWatchedAt || null,
       };
     });
@@ -195,6 +210,8 @@ const summarizeItems = (items) => {
     missed: 0,
     doneOnTime: 0,
     doneLate: 0,
+    selfReported: 0,
+    adminMarked: 0,
     datesMissedEver: 0,
     dateChanges: 0,
     nextDate: null,
@@ -214,6 +231,8 @@ const summarizeItems = (items) => {
     if (it.status === "missed") out.missed += 1;
     if (it.status === "done_on_time") out.doneOnTime += 1;
     if (it.status === "done_late") out.doneLate += 1;
+    if (it.status === "self_reported") out.selfReported += 1;
+    if (it.status === "admin_marked") out.adminMarked += 1;
     if (it.commitment) {
       out.datesMissedEver += it.commitment.missedCount || 0;
       out.dateChanges += it.commitment.changeCount || 0;
