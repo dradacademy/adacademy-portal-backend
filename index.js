@@ -66,6 +66,10 @@ app.set("trust proxy", 1);
     }),
   );
 
+  // Live Q&A polls every few seconds — has its own per-user limiter, so it
+  // is mounted before the general per-IP one (see routes/liveQaRoute.js).
+  app.use("/api/live-qa", require("./routes/liveQaRoute"));
+
   app.use(generalLimiter);
 
   app.use("/api/users", authLimiter, require("./routes/userRoute"));
