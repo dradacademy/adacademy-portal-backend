@@ -10,9 +10,12 @@ const https = require("https");
 //     videos, sorted by views (most viewed first). Needs no key.
 // Which channel: YOUTUBE_CHANNEL_ID if set, else it is looked up from the
 // handle in YOUTUBE_HANDLE (default "@dradacademy") once and remembered.
-// Pinned videos (2026-10-30): the academy's chosen best videos always show
-// FIRST. Default = the two Dr. Dinesh shared; YOUTUBE_PINNED on Railway
-// (comma-separated links or IDs) replaces the list without a code change.
+// Pinned videos: YOUTUBE_PINNED on Railway (comma-separated links or IDs)
+// puts chosen free classes FIRST. Empty by default.
+// Showcase videos (2026-10-30): "Inside our classroom" — Dr. Dinesh's own
+// videos of how classes are handled + student testimonials. They are NOT
+// free classes: returned separately as `showcase` and kept out of `data`.
+// Default = the two he shared; YOUTUBE_SHOWCASE on Railway replaces them.
 // Unlisted videos (the paid recorded classes) are never in either list.
 // Results are cached for 6 hours so the website stays fast and YouTube is
 // asked rarely. If anything fails, the list is just empty and the website
@@ -23,7 +26,9 @@ const FAIL_RETRY_MS = 15 * 60 * 1000;
 let cache = { at: 0, data: null, source: null };
 let channelIdCache = null;
 
-const DEFAULT_PINNED = ["gkjKBEDNNro", "ej97klfOlNQ"];
+const DEFAULT_PINNED = [];
+const DEFAULT_SHOWCASE = ["gkjKBEDNNro", "ej97klfOlNQ"];
+let showcaseCache = { at: 0, key: "", data: [] };
 const HANDLE = () => (process.env.YOUTUBE_HANDLE || "@dradacademy").trim().replace(/^@?/, "@");
 
 // Accepts a bare ID or any YouTube link (youtu.be/…, watch?v=…, /shorts/…, /live/…).
@@ -34,20 +39,35 @@ const toVideoId = (raw = "") => {
   return m ? m[1] : null;
 };
 
-const pinnedIds = () => {
-  const env = process.env.YOUTUBE_PINNED;
-  const list = env ? env.split(/[\s,]+/).map(toVideoId).filter(Boolean) : DEFAULT_PINNED;
+const idList = (env, fallback) => {
+  const list = env ? env.split(/[\s,]+/).map(toVideoId).filter(Boolean) : fallback;
   return [...new Set(list)];
 };
+const pinnedIds = () => idList(process.env.YOUTUBE_PINNED, DEFAULT_PINNED);
+const showcaseIds = () => idList(process.env.YOUTUBE_SHOWCASE, DEFAULT_SHOWCASE);
 
 // Title of one video, no key needed (YouTube's public oEmbed).
 const fromOembed = async (id) => {
   try {
     const j = JSON.parse(await get(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${id}&format=json`));
-    return { id, title: decode(j.title || ""), publishedAt: null, views: 0, isShort: false };
+    // A Short / vertical video comes back taller than wide.
+    const portrait = Number(j.height) > Number(j.width);
+    return { id, title: decode(j.title || ""), publishedAt: null, views: 0, isShort: false, portrait };
   } catch (e) {
     return { id, title: "", publishedAt: null, views: 0, isShort: false };
   }
+};
+
+// Showcase list (titles via oEmbed), cached like the main list.
+const getShowcase = async () => {
+  const ids = showcaseIds();
+  const key = ids.join(",");
+  const okAge = showcaseCache.data.some((v) => v.title) ? CACHE_MS : FAIL_RETRY_MS;
+  if (showcaseCache.key === key && Date.now() - showcaseCache.at < okAge) return showcaseCache.data;
+  const data = [];
+  for (const id of ids) data.push(await fromOembed(id));
+  showcaseCache = { at: Date.now(), key, data };
+  return data;
 };
 
 // Pinned videos first (in the order given), then the rest without repeats.
@@ -178,10 +198,16 @@ const getPopularVideos = async (req, res) => {
         cache = { at: Date.now(), data: fallback, source: "error" };
       }
     }
+    let showcase = [];
+    try {
+      showcase = await getShowcase();
+    } catch (_) {}
+    const showIds = new Set(showcase.map((v) => v.id));
     res.set("Cache-Control", "public, max-age=900");
     res.status(200).json({
       success: true,
-      data: cache.data || [],
+      data: (cache.data || []).filter((v) => !showIds.has(v.id)),
+      showcase,
       channelUrl: `https://www.youtube.com/${HANDLE()}`,
       source: cache.source,
     });
@@ -190,4 +216,4 @@ const getPopularVideos = async (req, res) => {
   }
 };
 
-module.exports = { getPopularVideos, _test: { fromFeed, resolveChannelId, decode, toVideoId, pinnedIds, withPinned } };
+module.exports = { getPopularVideos, _test: { fromFeed, resolveChannelId, decode, toVideoId, pinnedIds, showcaseIds, withPinned, getShowcase } };
