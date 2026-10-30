@@ -45,7 +45,9 @@ module.exports = {
 const livePollSchema = new mongoose.Schema(
   {
     liveClassId: { type: mongoose.Schema.Types.ObjectId, ref: "LiveClass", required: true, index: true },
-    kind: { type: String, enum: ["mcq", "numeric"], required: true },
+    // "attendance" (2026-10-30): an attendance check — students just tap
+    // "I'm present" before it closes. No points, never on the leaderboard.
+    kind: { type: String, enum: ["mcq", "numeric", "attendance"], required: true },
     text: { type: String, default: "", maxlength: 1000 }, // may be blank: "question is on screen"
     options: { type: [String], default: [] }, // MCQ labels (A–D text, may be blank)
     correctIndex: { type: Number, default: null },
@@ -71,6 +73,8 @@ const livePollAnswerSchema = new mongoose.Schema(
     correct: { type: Boolean, default: false },
     points: { type: Number, default: 0 },
     ms: { type: Number, default: 0 }, // time taken to answer
+    // true = a reply to an attendance check (kept out of quiz scores).
+    isAttendance: { type: Boolean, default: false },
   },
   { timestamps: true }
 );
