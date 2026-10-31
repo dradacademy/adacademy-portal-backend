@@ -150,7 +150,8 @@ const summarizeTests = (bucket) => {
 // ── Student ────────────────────────────────────────────────────────────
 
 const PLAN_LABEL = (key) => (key === "Language" ? "Tamil (all units)" : key === "Aptitude" ? "Aptitude (all topics)" : key);
-const maxDateFor = (config, subject) => (subject === "Civil" ? config.civilExamDate : config.gsExamDate);
+const maxDateFor = (config, subject, track) =>
+  subject === "Civil" ? (track === "draughtsman" ? config.draughtsmanExamDate || "2026-11-24" : config.civilExamDate) : config.gsExamDate;
 
 const trackOf = (plan) => civilTrackOf(plan && plan.civilTrack);
 const missingDatesOf = (planDates, config, track) =>
@@ -158,7 +159,7 @@ const missingDatesOf = (planDates, config, track) =>
     key: p.key,
     subject: p.subject,
     label: PLAN_LABEL(p.key),
-    maxDate: maxDateFor(config, p.subject),
+    maxDate: maxDateFor(config, p.subject, track),
   }));
 
 // A check the student failed and hasn't passed since — they must clear it
@@ -219,6 +220,7 @@ const getMine = async (req, res) => {
       missingDates: missingDatesOf(planDates, config, civilTrack),
       civilTrack,
       civilLabel: CIVIL_TRACKS[civilTrack].label,
+      civilExamDate: maxDateFor(config, "Civil", civilTrack),
       pendingCheck,
       testTotalMarks: config.testTotalMarks,
       quizQuestionCount: config.quizQuestionCount,
@@ -270,7 +272,7 @@ const fillMyMissingDates = async (req, res) => {
     for (const [k, v] of Object.entries(req.body?.dates || {})) {
       if (!subjectOf.has(k) || current[k] || !v) continue;
       if (!ymdRe.test(v)) return fail(res, 400, `Please pick a proper date for ${PLAN_LABEL(k)}.`);
-      const max = maxDateFor(config, subjectOf.get(k));
+      const max = maxDateFor(config, subjectOf.get(k), track);
       if (v < today || v > max) return fail(res, 400, `${PLAN_LABEL(k)}: choose a date between today and ${max}.`);
       current[k] = v;
       added += 1;
@@ -503,7 +505,7 @@ const buildClassSummary = async (day) => {
 
   return {
     day,
-    exams: { gs: config.gsExamDate, civil: config.civilExamDate },
+    exams: { gs: config.gsExamDate, civil: config.civilExamDate, draughtsman: config.draughtsmanExamDate || "2026-11-24" },
     config: { passPercent: config.passPercent, quizQuestionCount: config.quizQuestionCount, reminderTime: config.reminderTime, enabled: config.enabled },
     syllabus: { subjects: SUBJECTS, labels: SUBJECT_LABELS, units: UNITS, civilTracks: CIVIL_TRACKS, materials: MATERIALS },
     rows,
@@ -628,6 +630,7 @@ const getAdminConfig = async (req, res) => {
         testTotalMarks: config.testTotalMarks,
         gsExamDate: config.gsExamDate,
         civilExamDate: config.civilExamDate,
+        draughtsmanExamDate: config.draughtsmanExamDate || "2026-11-24",
       },
       syllabus: { subjects: SUBJECTS, labels: SUBJECT_LABELS, units: { ...UNITS, Civil: [...CIVIL_TRACKS.jdo.units, ...CIVIL_TRACKS.draughtsman.units] }, civilTracks: CIVIL_TRACKS, materials: MATERIALS, poolFallback: POOL_FALLBACK },
       questionPools: poolsOf(config),
@@ -670,6 +673,7 @@ const saveAdminConfig = async (req, res) => {
       if (Number.isFinite(t) && t >= 1 && t <= 1000) config.testTotalMarks = t;
       if (ymdRe.test(settings.gsExamDate || "")) config.gsExamDate = settings.gsExamDate;
       if (ymdRe.test(settings.civilExamDate || "")) config.civilExamDate = settings.civilExamDate;
+      if (ymdRe.test(settings.draughtsmanExamDate || "")) config.draughtsmanExamDate = settings.draughtsmanExamDate;
     }
     if (questionPools && typeof questionPools === "object") {
       const validKeys = new Set();

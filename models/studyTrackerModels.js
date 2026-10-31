@@ -26,6 +26,8 @@ const configSchema = new mongoose.Schema(
     // Latest allowed target date when a student fills a missing one.
     gsExamDate: { type: String, default: "2026-11-15" },
     civilExamDate: { type: String, default: "2026-11-22" },
+    // Students on the Draughtsman Civil (388) syllabus.
+    draughtsmanExamDate: { type: String, default: "2026-11-24" },
     // Question sources for each check: key "GS::Polity::New notes".
     // Stored as a list (not a Map) because unit names contain dots, which
     // MongoDB map keys can't hold.

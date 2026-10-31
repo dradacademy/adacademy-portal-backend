@@ -20,6 +20,9 @@ const {
 } = require("../utils/recordedClassGrouping");
 
 // Admin listing row: availability info + current subject/subtopic names.
+const PARTS = ["", "theory", "problems", "both"];
+const cleanPart = (v) => (PARTS.includes(String(v || "").toLowerCase()) ? String(v || "").toLowerCase() : null);
+
 const toAdminRow = (rec, lookup) => {
   const row = withAvailability(rec);
   const grouping = describeGrouping(rec, lookup);
@@ -39,6 +42,7 @@ const createRecordedClass = async (req, res) => {
       category,
       subject,
       subtopic,
+      part,
       recordedDate,
       youtubeUrl,
       durationSeconds,
@@ -77,6 +81,7 @@ const createRecordedClass = async (req, res) => {
       description: description || "",
       category,
       ...grouping.fields,
+      part: cleanPart(part) || "",
       youtubeVideoId,
       recordedDate,
       durationSeconds:
@@ -154,6 +159,7 @@ const updateRecordedClass = async (req, res) => {
       category,
       subject,
       subtopic,
+      part,
       recordedDate,
       youtubeUrl,
       durationSeconds,
@@ -191,6 +197,7 @@ const updateRecordedClass = async (req, res) => {
         Object.assign(update, { subject: null, subtopic: null, subtopicName: "" });
       }
     }
+    if (part !== undefined && cleanPart(part) !== null) update.part = cleanPart(part);
     if (recordedDate !== undefined) update.recordedDate = recordedDate;
     if (active !== undefined) update.active = active;
     const availability = parseAvailabilityInput(req.body);
@@ -467,7 +474,10 @@ const bulkGroupRecordedClasses = async (req, res) => {
       filter = { _id: { $in: ids }, category: subjectDoc.category };
     }
 
-    const result = await recordedClassModel.updateMany(filter, { $set: grouping.fields });
+    // Theory/Problems: only changed when the dialog sends it.
+    const set = { ...grouping.fields };
+    if (req.body.part !== undefined && cleanPart(req.body.part) !== null) set.part = cleanPart(req.body.part);
+    const result = await recordedClassModel.updateMany(filter, { $set: set });
     res.status(200).json({
       success: true,
       updated: result.matchedCount,

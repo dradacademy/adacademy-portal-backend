@@ -18,6 +18,10 @@ const {
   parseAvailabilityInput,
   withAvailability,
 } = require("../utils/classAvailability");
+const { resolveGrouping } = require("../utils/recordedClassGrouping");
+
+const PARTS = ["", "theory", "problems", "both"];
+const cleanPart = (v) => (PARTS.includes(String(v || "").toLowerCase()) ? String(v || "").toLowerCase() : null);
 
 // The replay availability chosen for a live class, in RecordedClass field
 // form. Old live classes created before this setting existed get the
@@ -53,6 +57,9 @@ const addRecordingFromLiveClass = async (liveClass, userId) => {
       description: "",
       category: liveClass.category,
       subject: liveClass.subject || null,
+      subtopic: liveClass.subtopic || null,
+      subtopicName: liveClass.subtopicName || "",
+      part: liveClass.part || "",
       youtubeVideoId: liveClass.youtubeVideoId,
       recordedDate: liveClass.startedAt || new Date(),
       durationSeconds: liveClass.endedAt
@@ -110,7 +117,7 @@ const autoEndOverdueLiveClasses = async (category) => {
 // category never shows two "live now" entries at once.
 const startLiveClass = async (req, res) => {
   try {
-    const { title, category, subject, youtubeUrl } = req.body;
+    const { title, category, subject, subtopic, part, youtubeUrl } = req.body;
 
     if (!title || !category || !youtubeUrl) {
       return res.status(400).json({
@@ -126,6 +133,12 @@ const startLiveClass = async (req, res) => {
         message:
           "That doesn't look like a valid YouTube link. Paste the full YouTube Live watch URL (e.g. https://youtube.com/watch?v=VIDEOID) or the 11-character video ID.",
       });
+    }
+
+    // Subject → Subtopic (checked against the category) + Theory/Problems.
+    const grouping = await resolveGrouping({ category, subject, subtopic });
+    if (!grouping.ok) {
+      return res.status(400).json({ success: false, message: grouping.message });
     }
 
     // How long the replay stays available after the class ends.
@@ -148,7 +161,8 @@ const startLiveClass = async (req, res) => {
     const liveClass = await liveClassModel.create({
       title,
       category,
-      subject: subject || null,
+      ...grouping.fields,
+      part: cleanPart(part) || "",
       youtubeVideoId,
       active: true,
       startedBy: req.user._id,
@@ -176,7 +190,7 @@ const startLiveClass = async (req, res) => {
 const updateLiveClass = async (req, res) => {
   try {
     const { id } = req.params;
-    const { title, category, subject, youtubeUrl, durationMinutes } = req.body;
+    const { title, category, subject, subtopic, part, youtubeUrl, durationMinutes } = req.body;
 
     const update = {};
     const availability = parseAvailabilityInput(req.body);
@@ -192,7 +206,27 @@ const updateLiveClass = async (req, res) => {
     }
     if (title !== undefined) update.title = title;
     if (category !== undefined) update.category = category;
-    if (subject !== undefined) update.subject = subject || null;
+    if (subject !== undefined || subtopic !== undefined || category !== undefined) {
+      const existing = await liveClassModel.findById(id).select("category subject subtopic");
+      if (!existing) {
+        return res.status(404).json({ success: false, message: "Live class not found." });
+      }
+      const grouping = await resolveGrouping({
+        category: category !== undefined ? category : existing.category,
+        subject: subject !== undefined ? subject : existing.subject,
+        subtopic:
+          subtopic !== undefined
+            ? subtopic
+            : subject !== undefined && String(subject || "") !== String(existing.subject || "")
+            ? null
+            : existing.subtopic,
+      });
+      if (grouping.ok) Object.assign(update, grouping.fields);
+      else if (subject !== undefined || subtopic !== undefined) {
+        return res.status(400).json({ success: false, message: grouping.message });
+      } else Object.assign(update, { subject: null, subtopic: null, subtopicName: "" });
+    }
+    if (part !== undefined && cleanPart(part) !== null) update.part = cleanPart(part);
     if (youtubeUrl !== undefined) {
       const youtubeVideoId = extractYoutubeVideoId(youtubeUrl);
       if (!youtubeVideoId) {
@@ -216,6 +250,10 @@ const updateLiveClass = async (req, res) => {
     // and the corrected class length.
     const recordingUpdate = {};
     if (update.youtubeVideoId) recordingUpdate.youtubeVideoId = update.youtubeVideoId;
+    // Subject / subtopic / Theory-Problems changes follow onto the replay.
+    for (const k of ["subject", "subtopic", "subtopicName", "part"]) {
+      if (update[k] !== undefined) recordingUpdate[k] = update[k];
+    }
     // A changed replay period applies to the replay that already exists too.
     if (availability) Object.assign(recordingUpdate, replayAvailabilityFields(liveClass));
     if (durationMinutes !== undefined && !liveClass.active) {

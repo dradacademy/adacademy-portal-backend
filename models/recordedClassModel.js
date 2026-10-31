@@ -56,6 +56,14 @@ const recordedClassSchema = new mongoose.Schema(
       default: "",
       trim: true,
     },
+    // Which part of the subtopic this class covers (2026-10-31): "theory",
+    // "both" (theory + problems in one class),
+    // "problems", or "" (not set). Grouping/filtering only.
+    part: {
+      type: String,
+      enum: ["", "theory", "problems", "both"],
+      default: "",
+    },
     // The 11-character YouTube video ID (extracted from whatever URL format
     // the admin pastes — watch?v=, youtu.be/, embed/, shorts/ — see
     // utils/youtube.js). This is the only identifier needed to embed the

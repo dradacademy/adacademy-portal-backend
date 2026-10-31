@@ -34,7 +34,7 @@ const listAvailableVideos = async (req, res) => {
       recordedClassModel
         .find({ category: req.user.category, active: true })
         .select(
-          "title description category subject subtopic subtopicName recordedDate durationSeconds visibilityWindowDays availableUntil active"
+          "title description category subject subtopic subtopicName part recordedDate durationSeconds visibilityWindowDays availableUntil active"
         )
         .sort({ recordedDate: -1 }),
       enrollmentModel.findOne({
@@ -67,6 +67,7 @@ const listAvailableVideos = async (req, res) => {
         recordedDate: video.recordedDate,
         durationSeconds: video.durationSeconds,
         ...describeGrouping(video, subjectLookup),
+        part: video.part || "",
         // When this class drops off the student's list (11:59 PM IST on
         // its last day), or null if it never expires — shown on the card
         // as "Available till ...".
