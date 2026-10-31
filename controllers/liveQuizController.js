@@ -52,7 +52,7 @@ const shapePoll = (poll, myAnswer, { isAdmin = false } = {}) => {
 const computeLeaderboard = async (liveClassIds) => {
   const ids = liveClassIds.map((id) => new mongoose.Types.ObjectId(String(id)));
   const [answers, questions] = await Promise.all([
-    LivePollAnswer.find({ liveClassId: { $in: ids } }).select("userId name liveClassId points correct").lean(),
+    LivePollAnswer.find({ liveClassId: { $in: ids }, isAttendance: { $ne: true } }).select("userId name liveClassId points correct").lean(),
     LiveQuestion.find({ liveClassId: { $in: ids }, status: { $ne: "hidden" } }).select("userId name liveClassId upvotes").lean(),
   ]);
   const rows = new Map();
@@ -114,10 +114,11 @@ const sameDayClassIds = async (liveClass) => {
 // Called by liveQaController.getBoard — quiz + leaderboard part of the board.
 const quizStateFor = async (liveClass, user) => {
   const isAdmin = user.role === "admin";
-  const polls = await LivePoll.find({ liveClassId: liveClass._id }).sort({ startedAt: -1 }).limit(isAdmin ? 50 : 5).lean();
+  const polls = await LivePoll.find({ liveClassId: liveClass._id, kind: { $ne: "attendance" } }).sort({ startedAt: -1 }).limit(isAdmin ? 50 : 5).lean();
   const now = Date.now();
   const current = polls.find((p) => isOpen(p, now)) || null;
   const lastClosed = polls.find((p) => !isOpen(p, now)) || null;
+  const attendance = await attendanceStateFor(liveClass, user);
 
   const myAnswers = isAdmin
     ? []
@@ -131,6 +132,7 @@ const quizStateFor = async (liveClass, user) => {
     scoring: SCORE,
     currentPoll: current ? shapePoll(current, mine.get(String(current._id)), { isAdmin }) : null,
     lastPoll: lastClosed ? shapePoll(lastClosed, mine.get(String(lastClosed._id)), { isAdmin }) : null,
+    attendance,
     leaderboard: {
       top: board.slice(0, 5).map(({ userId, ...r }) => ({ ...r, me: userId === String(user._id) })),
       me: meRow ? { rank: meRow.rank, points: meRow.points, of: board.length, aheadBy: (() => {
@@ -161,6 +163,148 @@ const quizStateFor = async (liveClass, user) => {
   return out;
 };
 
+// ── Attendance checks (2026-10-30) ─────────────────────────────────────
+// The teacher presses "Attendance check" several times during a live
+// class; each time students must tap "I'm present" within the time limit.
+// Attendance % = checks answered ÷ checks asked (e.g. 4 of 5 = 80%).
+
+// For the board (student + admin): the open check and this class's count.
+const attendanceStateFor = async (liveClass, user) => {
+  const checks = await LivePoll.find({ liveClassId: liveClass._id, kind: "attendance" })
+    .sort({ startedAt: -1 })
+    .select("_id startedAt closesAt closedAt timeLimitSec")
+    .lean();
+  const now = Date.now();
+  const open = checks.find((c) => isOpen(c, now)) || null;
+  if (user.role === "admin") {
+    const counts = open ? await LivePollAnswer.countDocuments({ pollId: open._id }) : 0;
+    return {
+      total: checks.length,
+      current: open ? { _id: open._id, startedAt: open.startedAt, closesAt: open.closesAt, responded: counts } : null,
+    };
+  }
+  const mine = checks.length
+    ? await LivePollAnswer.find({ pollId: { $in: checks.map((c) => c._id) }, userId: user._id }).select("pollId").lean()
+    : [];
+  const answered = new Set(mine.map((a) => String(a.pollId)));
+  return {
+    total: checks.length,
+    responded: answered.size,
+    percent: checks.length ? Math.round((answered.size / checks.length) * 100) : null,
+    current: open
+      ? { _id: open._id, startedAt: open.startedAt, closesAt: open.closesAt, timeLimitSec: open.timeLimitSec, done: answered.has(String(open._id)) }
+      : null,
+  };
+};
+
+// GET /api/live-qa/:liveClassId/attendance-checks?scope=class|day|month (admin)
+// Every student of the course (who can watch live classes) with how many
+// checks they answered, so students who never answered show 0%.
+const getAttendanceChecks = async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.liveClassId)) return fail(res, 404, "Live class not found.");
+    const liveClass = await liveClassModel.findById(req.params.liveClassId).select("title category startedAt").lean();
+    if (!liveClass) return fail(res, 404, "Live class not found.");
+
+    const scope = ["day", "month"].includes(req.query.scope) ? req.query.scope : "class";
+    let classIds = [liveClass._id];
+    let label = liveClass.title;
+    if (scope === "day") {
+      const day = await sameDayClassIds(liveClass);
+      classIds = day.ids;
+      label = `All live classes on ${day.ymd}`;
+    } else if (scope === "month") {
+      const since = new Date(Date.now() - 30 * 24 * 3600 * 1000);
+      const list = await liveClassModel.find({ category: liveClass.category, startedAt: { $gte: since } }).select("_id").lean();
+      classIds = list.map((c) => c._id);
+      label = "All live classes in the last 30 days";
+    }
+
+    const checks = await LivePoll.find({ liveClassId: { $in: classIds }, kind: "attendance" })
+      .sort({ startedAt: 1 })
+      .select("_id liveClassId startedAt closesAt closedAt timeLimitSec")
+      .lean();
+    const answers = checks.length
+      ? await LivePollAnswer.find({ pollId: { $in: checks.map((c) => c._id) } }).select("pollId userId name").lean()
+      : [];
+
+    // Everyone in the course who could attend live classes.
+    const enrollmentModel = require("../models/enrollmentModel");
+    const { isEnrollmentActive } = require("../models/enrollmentModel");
+    const students = await userModel
+      .find({ role: "student", category: liveClass.category, accountType: { $ne: "free_trial" }, isDisabled: { $ne: true } })
+      .select("username registerNumber batch")
+      .lean();
+    const enrollments = await enrollmentModel
+      .find({ userId: { $in: students.map((s) => s._id) }, category: liveClass.category })
+      .select("userId validTill revoked accessLevel")
+      .lean();
+    const canAttend = new Set(
+      enrollments.filter((e) => isEnrollmentActive(e) && e.accessLevel !== "test_series_only").map((e) => String(e.userId))
+    );
+
+    const byUser = new Map();
+    const perCheck = new Map(checks.map((c) => [String(c._id), 0]));
+    for (const a of answers) {
+      const k = String(a.userId);
+      if (!byUser.has(k)) byUser.set(k, { name: a.name, polls: new Set() });
+      byUser.get(k).polls.add(String(a.pollId));
+      perCheck.set(String(a.pollId), (perCheck.get(String(a.pollId)) || 0) + 1);
+    }
+
+    const total = checks.length;
+    const rows = [];
+    const seen = new Set();
+    for (const s of students) {
+      const k = String(s._id);
+      const got = byUser.get(k);
+      if (!canAttend.has(k) && !got) continue;
+      seen.add(k);
+      const responded = got ? got.polls.size : 0;
+      rows.push({
+        userId: k,
+        name: s.username,
+        registerNumber: s.registerNumber || "",
+        batch: s.batch || "",
+        responded,
+        total,
+        percent: total ? Math.round((responded / total) * 100) : null,
+        answeredChecks: got ? [...got.polls] : [],
+      });
+    }
+    // Anyone who answered but isn't in the list above (e.g. moved course).
+    for (const [k, v] of byUser) {
+      if (seen.has(k)) continue;
+      rows.push({ userId: k, name: v.name || "Student", registerNumber: "", batch: "", responded: v.polls.size, total, percent: total ? Math.round((v.polls.size / total) * 100) : null, answeredChecks: [...v.polls] });
+    }
+    rows.sort((a, b) => (b.percent ?? -1) - (a.percent ?? -1) || a.name.localeCompare(b.name));
+
+    return ok(res, {
+      scope,
+      label,
+      classes: classIds.length,
+      checks: checks.map((c) => ({
+        _id: c._id,
+        liveClassId: c.liveClassId,
+        startedAt: c.startedAt,
+        closesAt: c.closedAt || c.closesAt,
+        open: isOpen(c),
+        responded: perCheck.get(String(c._id)) || 0,
+      })),
+      rows,
+      summary: {
+        students: rows.length,
+        full: rows.filter((r) => total && r.responded === total).length,
+        none: rows.filter((r) => total && r.responded === 0).length,
+        average: rows.length && total ? Math.round(rows.reduce((n, r) => n + r.percent, 0) / rows.length) : null,
+      },
+    });
+  } catch (err) {
+    console.error("liveQuiz.getAttendanceChecks", err);
+    return fail(res, 500, "Could not load attendance.");
+  }
+};
+
 // POST /api/live-qa/:liveClassId/polls (admin)
 // { kind: "mcq"|"numeric", text, options[], correctIndex, correctValue, tolerance, points, timeLimitSec }
 const createPoll = async (req, res) => {
@@ -169,8 +313,25 @@ const createPoll = async (req, res) => {
     const liveClass = await liveClassModel.findById(req.params.liveClassId).select("_id").lean();
     if (!liveClass) return fail(res, 404, "Live class not found.");
     const b = req.body || {};
-    const kind = b.kind === "numeric" ? "numeric" : "mcq";
-    const timeLimitSec = Math.min(1800, Math.max(10, Math.round(Number(b.timeLimitSec) || 60)));
+    const kind = b.kind === "attendance" ? "attendance" : b.kind === "numeric" ? "numeric" : "mcq";
+    let timeLimitSec = Math.min(1800, Math.max(10, Math.round(Number(b.timeLimitSec) || 60)));
+    if (kind === "attendance") {
+      // Fixed 20 seconds (admin's rule, 2026-10-30): answer within 20 s
+      // or miss it.
+      timeLimitSec = 20;
+      // Closes only an earlier open attendance check — a quiz question
+      // that is running stays open.
+      await LivePoll.updateMany(
+        { liveClassId: liveClass._id, kind: "attendance", closedAt: null, closesAt: { $gt: new Date() } },
+        { $set: { closedAt: new Date() } }
+      );
+      const now = new Date();
+      const check = await LivePoll.create({
+        liveClassId: liveClass._id, kind, text: "Attendance check", points: 0, timeLimitSec,
+        startedAt: now, closesAt: new Date(now.getTime() + timeLimitSec * 1000),
+      });
+      return ok(res, shapePoll(check.toObject(), null, { isAdmin: true }));
+    }
     const points = Math.min(100, Math.max(1, Math.round(Number(b.points) || 10)));
     const doc = { liveClassId: liveClass._id, kind, text: String(b.text || "").slice(0, 1000), points, timeLimitSec };
     if (kind === "mcq") {
@@ -185,8 +346,9 @@ const createPoll = async (req, res) => {
       doc.correctValue = v;
       doc.tolerance = Math.max(0, Number(b.tolerance) || 0);
     }
-    // Only one question open at a time — close any open one.
-    await LivePoll.updateMany({ liveClassId: liveClass._id, closedAt: null, closesAt: { $gt: new Date() } }, { $set: { closedAt: new Date() } });
+    // Only one question open at a time — close any open one (attendance
+    // checks are separate and stay open).
+    await LivePoll.updateMany({ liveClassId: liveClass._id, kind: { $ne: "attendance" }, closedAt: null, closesAt: { $gt: new Date() } }, { $set: { closedAt: new Date() } });
     const now = new Date();
     const poll = await LivePoll.create({ ...doc, startedAt: now, closesAt: new Date(now.getTime() + timeLimitSec * 1000) });
     return ok(res, shapePoll(poll.toObject(), null, { isAdmin: true }));
@@ -221,6 +383,18 @@ const makeAnswerHandler = (checkAccess) => async (req, res) => {
 
     let correct = false;
     const doc = { pollId: poll._id, liveClassId: poll.liveClassId, userId: req.user._id, name: req.user.username || "Student" };
+    if (poll.kind === "attendance") {
+      try {
+        await LivePollAnswer.create({
+          ...doc, choice: 0, correct: true, points: 0, isAttendance: true,
+          ms: Math.max(0, Date.now() - new Date(poll.startedAt).getTime()),
+        });
+      } catch (e) {
+        if (e && e.code === 11000) return ok(res, { saved: true, already: true });
+        throw e;
+      }
+      return ok(res, { saved: true });
+    }
     if (poll.kind === "mcq") {
       const c = Number(req.body?.choice);
       if (!Number.isInteger(c) || c < 0 || c >= poll.options.length) return fail(res, 400, "Pick an option.");
@@ -267,4 +441,4 @@ const getLeaderboard = async (req, res) => {
   }
 };
 
-module.exports = { SCORE, quizStateFor, createPoll, closePoll, makeAnswerHandler, getLeaderboard, computeLeaderboard };
+module.exports = { SCORE, quizStateFor, createPoll, closePoll, makeAnswerHandler, getLeaderboard, computeLeaderboard, getAttendanceChecks };

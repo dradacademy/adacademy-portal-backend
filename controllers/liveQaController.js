@@ -207,4 +207,5 @@ module.exports = {
   closePoll: liveQuiz.closePoll,
   answerPoll: liveQuiz.makeAnswerHandler(checkStudentAccess),
   getLeaderboard: liveQuiz.getLeaderboard,
+  getAttendanceChecks: liveQuiz.getAttendanceChecks,
 };
