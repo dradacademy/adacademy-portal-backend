@@ -204,7 +204,7 @@ const loginUser = async (req, res) => {
       return res.status(400).json({ error: "All fields are required" });
     }
 
-    const user = await userModel.findOne({ email: email.toLowerCase() });
+    const user = await userModel.findOne({ email: String(email).trim().toLowerCase() });
     if (!user) {
       return res.status(400).json({ error: "Invalid credentials" });
     }
@@ -216,7 +216,10 @@ const loginUser = async (req, res) => {
     }
 
     if (user.role === "student" && user.accountType !== "free_trial") {
-      if (user.registerNumber !== registerNumber) {
+      // Ignore extra spaces and capital/small letters (2026-10-31) — a
+      // student typing "g27046 " is the same as "G27046".
+      const norm = (v) => String(v || "").trim().toUpperCase();
+      if (norm(user.registerNumber) !== norm(registerNumber)) {
         return res.status(400).json({ error: "Invalid Register Number" });
       }
     }
