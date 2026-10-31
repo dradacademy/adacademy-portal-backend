@@ -21,6 +21,7 @@ const IST_OFFSET_MS = 5.5 * 3600 * 1000;
 const ok = (res, data) => res.status(200).json({ success: true, data });
 const fail = (res, status, message) => res.status(status).json({ success: false, message });
 
+const ATTENDANCE_GRACE_MS = 15000;
 const isOpen = (poll, now = Date.now()) => !poll.closedAt && new Date(poll.closesAt).getTime() > now;
 
 // What a student may see of a poll (no answer until it closes).
@@ -379,7 +380,14 @@ const makeAnswerHandler = (checkAccess) => async (req, res) => {
     if (!poll) return fail(res, 404, "Question not found.");
     const { error } = await checkAccess(req.user, poll.liveClassId);
     if (error) return fail(res, error[0], error[1]);
-    if (!isOpen(poll)) return fail(res, 409, "Time is up for this question.");
+    // Attendance (2026-10-31): a tap made inside the 20 seconds can reach the
+    // server a few seconds late on a slow phone network — accept it for up to
+    // ATTENDANCE_GRACE_MS after the check closes so nobody is marked absent
+    // because of the network.
+    const lateOk =
+      poll.kind === "attendance" &&
+      Date.now() < new Date(poll.closedAt || poll.closesAt).getTime() + ATTENDANCE_GRACE_MS;
+    if (!isOpen(poll) && !lateOk) return fail(res, 409, "Time is up for this question.");
 
     let correct = false;
     const doc = { pollId: poll._id, liveClassId: poll.liveClassId, userId: req.user._id, name: req.user.username || "Student" };
