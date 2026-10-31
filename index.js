@@ -94,7 +94,6 @@ app.set("trust proxy", 1);
     require("./routes/enrollmentLeadRoute"),
   );
   app.use("/api/content", require("./routes/contentRoute"));
-  app.use("/api/public-videos", require("./routes/publicVideoRoute"));
   app.use("/api/recorded-classes", require("./routes/recordedClassRoute"));
   app.use("/api/videos", require("./routes/videoRoute"));
   app.use("/api/video-commitments", require("./routes/videoCommitmentRoute"));

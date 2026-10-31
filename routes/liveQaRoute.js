@@ -31,8 +31,6 @@ router.post("/polls/:pollId/close", authorizeRoles("admin"), c.closePoll);
 router.post("/polls/:pollId/answer", authorizeRoles("student"), requireCompletedProfile, c.answerPoll);
 router.post("/:liveClassId/polls", authorizeRoles("admin"), c.createPoll);
 router.get("/:liveClassId/leaderboard", authorizeRoles("admin"), c.getLeaderboard);
-// Attendance checks (2026-10-30): who tapped "I'm present", and %.
-router.get("/:liveClassId/attendance-checks", authorizeRoles("admin"), c.getAttendanceChecks);
 
 router.get("/:liveClassId", authorizeRoles("admin", "student"), requireCompletedProfile, c.getBoard);
 router.post("/:liveClassId/questions", authorizeRoles("student"), requireCompletedProfile, c.ask);

@@ -23,6 +23,10 @@ const {
   poolKey,
   isValidUnit,
   isValidMaterial,
+  CIVIL_TRACKS,
+  civilTrackOf,
+  unitsFor,
+  planKeysFor,
 } = require("../constants/studyTracker");
 const {
   istYmd,
@@ -145,11 +149,12 @@ const summarizeTests = (bucket) => {
 
 // ── Student ────────────────────────────────────────────────────────────
 
-const PLAN_LABEL = (key) => (key === "Language" ? "English (all units)" : key === "Aptitude" ? "Aptitude (all topics)" : key);
+const PLAN_LABEL = (key) => (key === "Language" ? "Tamil (all units)" : key === "Aptitude" ? "Aptitude (all topics)" : key);
 const maxDateFor = (config, subject) => (subject === "Civil" ? config.civilExamDate : config.gsExamDate);
 
-const missingDatesOf = (planDates, config) =>
-  ALL_PLAN_KEYS.filter((p) => !planDates[p.key]).map((p) => ({
+const trackOf = (plan) => civilTrackOf(plan && plan.civilTrack);
+const missingDatesOf = (planDates, config, track) =>
+  planKeysFor(track).filter((p) => !planDates[p.key]).map((p) => ({
     key: p.key,
     subject: p.subject,
     label: PLAN_LABEL(p.key),
@@ -199,7 +204,8 @@ const getMine = async (req, res) => {
     ]);
 
     const planDates = planDatesOf(plan);
-    const progress = buildStudentProgress({ entries, planDates, today });
+    const civilTrack = trackOf(plan);
+    const progress = buildStudentProgress({ entries, planDates, today, civilTrack });
     const entriesToday = entries.filter((e) => e.day === today);
     const now = istHm();
 
@@ -210,12 +216,14 @@ const getMine = async (req, res) => {
       reminderTime: config.reminderTime,
       reminderDue: now >= config.reminderTime && entriesToday.length === 0,
       introSeen: Boolean(state?.introSeenAt),
-      missingDates: missingDatesOf(planDates, config),
+      missingDates: missingDatesOf(planDates, config, civilTrack),
+      civilTrack,
+      civilLabel: CIVIL_TRACKS[civilTrack].label,
       pendingCheck,
       testTotalMarks: config.testTotalMarks,
       quizQuestionCount: config.quizQuestionCount,
       passPercent: config.passPercent,
-      syllabus: { subjects: SUBJECTS, labels: SUBJECT_LABELS, units: UNITS, materials: MATERIALS, steps: PROGRESS_STEPS },
+      syllabus: { subjects: SUBJECTS, labels: { ...SUBJECT_LABELS, Civil: CIVIL_TRACKS[civilTrack].label }, units: unitsFor(civilTrack), materials: MATERIALS, steps: PROGRESS_STEPS },
       planDates,
       progress,
       todayLog: {
@@ -255,8 +263,9 @@ const fillMyMissingDates = async (req, res) => {
     if (!config.enabled || !isTrackedStudent(user, config)) return fail(res, 403, "The study tracker is not open for you.");
     const plan = await StudyPlan.findOne({ userId: user._id }).lean();
     const current = planDatesOf(plan);
+    const track = trackOf(plan);
     const today = istYmd();
-    const subjectOf = new Map(ALL_PLAN_KEYS.map((p) => [p.key, p.subject]));
+    const subjectOf = new Map(planKeysFor(track).map((p) => [p.key, p.subject]));
     let added = 0;
     for (const [k, v] of Object.entries(req.body?.dates || {})) {
       if (!subjectOf.has(k) || current[k] || !v) continue;
@@ -267,7 +276,7 @@ const fillMyMissingDates = async (req, res) => {
       added += 1;
     }
     await StudyPlan.findOneAndUpdate({ userId: user._id }, { $set: { dates: toDateList(current) } }, { upsert: true });
-    return ok(res, { added, missingDates: missingDatesOf(current, config) });
+    return ok(res, { added, missingDates: missingDatesOf(current, config, track) });
   } catch (err) {
     console.error("studyTracker.fillMyMissingDates", err);
     return fail(res, 500, "Could not save your dates.");
@@ -300,7 +309,8 @@ const startCheck = async (req, res) => {
     if (!config.enabled || !isTrackedStudent(user, config)) return fail(res, 403, "The study tracker is not open for you.");
     const { subject, unit, material, topics = "" } = req.body || {};
     const percent = Number(req.body?.percent);
-    if (!isValidUnit(subject, unit) || !isValidMaterial(subject, material) || !PROGRESS_STEPS.includes(percent)) {
+    const myPlan = await StudyPlan.findOne({ userId: user._id }).select("civilTrack").lean();
+    if (!isValidUnit(subject, unit, trackOf(myPlan)) || !isValidMaterial(subject, material) || !PROGRESS_STEPS.includes(percent)) {
       return fail(res, 400, "Please choose the subject, unit, material and how much you finished.");
     }
     const pending = await findPendingCheck(user._id);
@@ -456,6 +466,7 @@ const buildClassSummary = async (day) => {
     loadTestAverages(ids, config),
   ]);
   const planBy = new Map(plans.map((p) => [String(p.userId), planDatesOf(p)]));
+  const trackBy = new Map(plans.map((p) => [String(p.userId), trackOf(p)]));
   const entriesBy = new Map();
   for (const e of entries) {
     const k = String(e.userId);
@@ -472,7 +483,8 @@ const buildClassSummary = async (day) => {
   const rows = students.map((s) => {
     const k = String(s._id);
     const mine = entriesBy.get(k) || [];
-    const progress = buildStudentProgress({ entries: mine, planDates: planBy.get(k) || {}, today: day });
+    const civilTrack = trackBy.get(k) || "jdo";
+    const progress = buildStudentProgress({ entries: mine, planDates: planBy.get(k) || {}, today: day, civilTrack });
     const todayEntries = mine.filter((e) => e.day === day);
     const todayAttempts = attemptsBy.get(k) || [];
     const lastDay = mine.map((e) => e.day).filter((d) => d <= day).sort().pop() || null;
@@ -483,6 +495,7 @@ const buildClassSummary = async (day) => {
       checksToday: { passed: todayAttempts.filter((a) => a.passed).length, failed: todayAttempts.filter((a) => !a.passed).length },
       lastUpdate: lastDay,
       hasPlan: Object.keys(planBy.get(k) || {}).length > 0,
+      civilTrack,
       progress,
       tests: summarizeTests(tests.get(k)),
     };
@@ -492,7 +505,7 @@ const buildClassSummary = async (day) => {
     day,
     exams: { gs: config.gsExamDate, civil: config.civilExamDate },
     config: { passPercent: config.passPercent, quizQuestionCount: config.quizQuestionCount, reminderTime: config.reminderTime, enabled: config.enabled },
-    syllabus: { subjects: SUBJECTS, labels: SUBJECT_LABELS, units: UNITS, materials: MATERIALS },
+    syllabus: { subjects: SUBJECTS, labels: SUBJECT_LABELS, units: UNITS, civilTracks: CIVIL_TRACKS, materials: MATERIALS },
     rows,
   };
 };
@@ -527,7 +540,8 @@ const getStudent = async (req, res) => {
     return ok(res, {
       student,
       planDates: planDatesOf(plan),
-      progress: buildStudentProgress({ entries, planDates: planDatesOf(plan) }),
+      civilTrack: trackOf(plan),
+      progress: buildStudentProgress({ entries, planDates: planDatesOf(plan), civilTrack: trackOf(plan) }),
       entries,
       attempts,
       tests: summarizeTests(tests.get(String(student._id))),
@@ -550,12 +564,14 @@ const savePlan = async (req, res) => {
       if (v && !ymdRe.test(v)) return fail(res, 400, `"${k}" has a wrong date. Use the date picker.`);
       if (v) dates[k] = v;
     }
+    const set = { dates: toDateList(dates), updatedBy: req.user._id };
+    if (CIVIL_TRACKS[req.body?.civilTrack]) set.civilTrack = req.body.civilTrack;
     const plan = await StudyPlan.findOneAndUpdate(
       { userId: student._id },
-      { $set: { dates: toDateList(dates), updatedBy: req.user._id } },
+      { $set: set },
       { upsert: true, new: true }
     ).lean();
-    return ok(res, { planDates: planDatesOf(plan) });
+    return ok(res, { planDates: planDatesOf(plan), civilTrack: trackOf(plan) });
   } catch (err) {
     console.error("studyTracker.savePlan", err);
     return fail(res, 500, "Could not save the target dates.");
@@ -613,7 +629,7 @@ const getAdminConfig = async (req, res) => {
         gsExamDate: config.gsExamDate,
         civilExamDate: config.civilExamDate,
       },
-      syllabus: { subjects: SUBJECTS, labels: SUBJECT_LABELS, units: UNITS, materials: MATERIALS, poolFallback: POOL_FALLBACK },
+      syllabus: { subjects: SUBJECTS, labels: SUBJECT_LABELS, units: { ...UNITS, Civil: [...CIVIL_TRACKS.jdo.units, ...CIVIL_TRACKS.draughtsman.units] }, civilTracks: CIVIL_TRACKS, materials: MATERIALS, poolFallback: POOL_FALLBACK },
       questionPools: poolsOf(config),
       chosenList: hasChosenList(config),
       studentIds: hasChosenList(config) ? config.studentIds.map(String) : (await trackedStudents(config)).map((u) => String(u._id)),
@@ -657,7 +673,7 @@ const saveAdminConfig = async (req, res) => {
     }
     if (questionPools && typeof questionPools === "object") {
       const validKeys = new Set();
-      for (const s of SUBJECTS) for (const u of UNITS[s]) for (const m of MATERIALS[s]) validKeys.add(poolKey(s, u, m));
+      for (const s of SUBJECTS) for (const u of (s === "Civil" ? [...CIVIL_TRACKS.jdo.units, ...CIVIL_TRACKS.draughtsman.units] : UNITS[s])) for (const m of MATERIALS[s]) validKeys.add(poolKey(s, u, m));
       const next = [];
       for (const [k, refs] of Object.entries(questionPools)) {
         if (!validKeys.has(k) || !Array.isArray(refs)) continue;
@@ -703,7 +719,9 @@ const importOld = async (req, res) => {
       if (!uid || !known.has(String(uid))) continue;
       const dates = {};
       for (const [k, v] of Object.entries(p.dates || {})) if (validPlanKeys.has(k) && ymdRe.test(v)) dates[k] = v;
-      await StudyPlan.findOneAndUpdate({ userId: uid }, { $set: { dates: toDateList(dates), updatedBy: req.user._id } }, { upsert: true });
+      const set = { dates: toDateList(dates), updatedBy: req.user._id };
+      if (CIVIL_TRACKS[p.civilTrack]) set.civilTrack = p.civilTrack;
+      await StudyPlan.findOneAndUpdate({ userId: uid }, { $set: set }, { upsert: true });
       planCount += 1;
     }
 

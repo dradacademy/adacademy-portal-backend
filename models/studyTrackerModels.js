@@ -55,6 +55,9 @@ const planSchema = new mongoose.Schema(
       type: [new mongoose.Schema({ key: { type: String, required: true }, date: { type: String, required: true } }, { _id: false })],
       default: [],
     },
+    // Which Civil syllabus this student follows: "jdo" (default) or
+    // "draughtsman" (TNPSC Draughtsman Civil, code 388). Admin only.
+    civilTrack: { type: String, enum: ["jdo", "draughtsman"], default: "jdo" },
     updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
   },
   { timestamps: true }

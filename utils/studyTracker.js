@@ -11,7 +11,7 @@
 //     done_on_time | done_late | overdue | due_soon (≤ 2 days) |
 //     in_progress | not_started | (no target → done / in_progress / not_started)
 
-const { UNITS, MATERIALS, SUBJECTS, SUBJECT_LEVEL_DATES, planKeyFor } = require("../constants/studyTracker");
+const { MATERIALS, SUBJECTS, SUBJECT_LEVEL_DATES, planKeyFor, unitsFor } = require("../constants/studyTracker");
 
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 const istYmd = (value = Date.now()) =>
@@ -62,8 +62,9 @@ const statusFor = ({ percent, finishedDay }, target, today) => {
 
 // Full picture for one student.
 //   planDates: { planKey: "YYYY-MM-DD" }
-const buildStudentProgress = ({ entries, planDates = {}, today = istYmd() }) => {
+const buildStudentProgress = ({ entries, planDates = {}, today = istYmd(), civilTrack = "jdo" }) => {
   const idx = indexEntries(entries, today);
+  const UNITS = unitsFor(civilTrack);
   const subjects = {};
   for (const subject of SUBJECTS) {
     const units = UNITS[subject].map((unit) => {
@@ -87,7 +88,7 @@ const buildStudentProgress = ({ entries, planDates = {}, today = istYmd() }) => 
   for (const subject of SUBJECTS) {
     const s = subjects[subject];
     if (SUBJECT_LEVEL_DATES.includes(subject)) {
-      if (s.target) items.push({ subject, unit: subject === "Language" ? "English (all units)" : "Aptitude (all topics)", percent: s.percent, target: s.target, status: s.status, days: s.days, missing: [] });
+      if (s.target) items.push({ subject, unit: subject === "Language" ? "Tamil (all units)" : "Aptitude (all topics)", percent: s.percent, target: s.target, status: s.status, days: s.days, missing: [] });
     } else {
       for (const u of s.units) {
         if (!u.target) continue;
@@ -106,6 +107,7 @@ const buildStudentProgress = ({ entries, planDates = {}, today = istYmd() }) => 
   const count = (st) => items.filter((i) => i.status === st).length;
   return {
     today,
+    civilTrack,
     subjects,
     items,
     counts: {
